@@ -88,6 +88,64 @@ static int trampoline_find(const char *name) {
     return -1;
 }
 
+// Generational handle retirement: keeps old dylib handles alive for N generations
+// before closing them with dlclose() to prevent race conditions during module reload.
+#define HOT_RETIRED_MAX 16
+#define HOT_RETIRED_GENERATIONS 4
+
+typedef struct {
+    void *handle;
+    uint32_t generation;
+} HotRetiredHandle;
+
+static HotRetiredHandle s_retired[HOT_RETIRED_MAX] = {0};
+static uint32_t s_current_generation = 0;
+
+static void hot_retire_handle(void *handle) {
+    if (!handle) return;
+
+    for (size_t i = 0; i < HOT_RETIRED_MAX; i++) {
+        if (s_retired[i].handle && (s_current_generation - s_retired[i].generation >= HOT_RETIRED_GENERATIONS)) {
+            dlclose(s_retired[i].handle);
+            s_retired[i].handle = NULL;
+        }
+    }
+
+    size_t slot = HOT_RETIRED_MAX;
+    for (size_t i = 0; i < HOT_RETIRED_MAX; i++) {
+        if (!s_retired[i].handle) {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot == HOT_RETIRED_MAX) {
+        size_t oldest_idx = 0;
+        uint32_t oldest_gen = UINT32_MAX;
+        for (size_t i = 0; i < HOT_RETIRED_MAX; i++) {
+            if (s_retired[i].generation < oldest_gen) {
+                oldest_gen = s_retired[i].generation;
+                oldest_idx = i;
+            }
+        }
+        dlclose(s_retired[oldest_idx].handle);
+        slot = oldest_idx;
+    }
+
+    s_retired[slot].handle = handle;
+    s_retired[slot].generation = s_current_generation;
+}
+
+static void hot_advance_generation(void) {
+    s_current_generation++;
+    for (size_t i = 0; i < HOT_RETIRED_MAX; i++) {
+        if (s_retired[i].handle && (s_current_generation - s_retired[i].generation >= HOT_RETIRED_GENERATIONS)) {
+            dlclose(s_retired[i].handle);
+            s_retired[i].handle = NULL;
+        }
+    }
+}
+
 // Get file modification time
 static time_t file_mtime(const char *path) {
     struct stat st;
@@ -168,6 +226,14 @@ void HotShutdown(HotModule *hot) {
         }
     }
     
+    // Drain retired handle ring
+    for (size_t i = 0; i < HOT_RETIRED_MAX; i++) {
+        if (s_retired[i].handle) {
+            dlclose(s_retired[i].handle);
+            s_retired[i].handle = NULL;
+        }
+    }
+
     free(hot);
 }
 
@@ -213,7 +279,7 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
             if (tidx >= 0) trampoline_set(tidx, entries[i].fn);
         }
         // Update module state
-        if ((*mod).handle) dlclose((*mod).handle);
+        if ((*mod).handle) hot_retire_handle((*mod).handle);
         (*mod).handle = handle;
         (*mod).last_modified = file_mtime(dylib_path);
         (*mod).loaded = true;
@@ -290,8 +356,8 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
     
     // 7. Update module state
     if ((*mod).handle) {
-        // Close old dylib after swap
-        dlclose((*mod).handle);
+        // Retire old dylib to grace period ring after swap
+        hot_retire_handle((*mod).handle);
     }
     
     (*mod).handle = handle;
@@ -305,6 +371,8 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
 HotResult Hot_poll(HotModule *hot, uint32_t *loaded_count) {
     if (!hot) return HOT_ERROR_FILE_NOT_FOUND;
     if (loaded_count) *loaded_count = 0;
+
+    hot_advance_generation();
     
     // Scan the hot directory for .dylib files
     DIR *dir = opendir((*hot).hot_dir);
@@ -382,7 +450,7 @@ HotResult Hot_poll(HotModule *hot, uint32_t *loaded_count) {
         if (result == HOT_OK) {
             // Success — commit the swap
             if ((*mod).handle) {
-                dlclose((*mod).handle);
+                hot_retire_handle((*mod).handle);
             }
             memcpy(mod, &clone_mod, sizeof(HotModuleInternal));
             reloaded++;
