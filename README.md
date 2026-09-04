@@ -1,4 +1,4 @@
-# hotcwap, by Vex, truly.
+# hotcwap. hot-c-wap.
 
 Zero-downtime dynamic module hot-reloading and persistent OS windowing.
 
