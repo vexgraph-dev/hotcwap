@@ -34,6 +34,12 @@ bool Vk_ready(void);
 // follows Window_getPresentMode(window).
 bool Vk_clearPresent(void);
 
+// Phase-3 live shader reload: rebuild tri/quad pipelines from current
+// .spv bytes with no device/surface/window teardown (tex/sdf rebuild
+// lazily on next draw). Try-lock: false means the worker owned the tick,
+// retry later. Re-baseline file watchers only on true.
+bool Vk_reloadShaders(void);
+
 // Pre-frame callback hook invoked before swapchain acquisition (e.g. offscreen passes).
 typedef void (*VkPreFrameFn)(Window *window, int drawW, int drawH, void *userdata);
 void Vk_setPreFrameRenderer(VkPreFrameFn fn, void *userdata);

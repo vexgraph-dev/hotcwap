@@ -1125,23 +1125,15 @@ static bool dumpWriteFile(void) {
 }
 
 
-// Build both child pipelines against the monitor view's cache renderpass,
-// plus the command pool and primary buffer that record each present loop.
-// Runs once at init — no more lazy first-frame building, no retry leaks.
-static bool buildPipelines(void) {
+// Build the tri + quad child pipelines against an already-live drawable
+// pass. Shared by init (buildPipelines) and Phase-3 live reload
+// (Vk_reloadShaders): same bytecode, no device/surface/window teardown.
+// Shader modules are destroyed right after each pipeline bakes — the
+// driver holds its own copy, so repeated reloads cannot accumulate leaks.
+static bool buildTriQuad(VkRenderPass pass) {
     VK_LOAD_DEVICE(CreatePipelineLayout)
     VK_LOAD_DEVICE(CreateGraphicsPipelines)
-    VK_LOAD_DEVICE(CreateCommandPool)
-    VK_LOAD_DEVICE(AllocateCommandBuffers)
-
-    // Renderpass compatibility: the drawable pass carries the same format +
-    // single-subpass shape the pipelines were designed against, so they run
-    // unchanged whether targeting a scene canvas or the window itself.
-    if (s_drawablePass == VK_NULL_HANDLE) {
-        snprintf(s_status, sizeof(s_status), "no drawable renderpass");
-        return false;
-    }
-    VkRenderPass pass = s_drawablePass;
+    VK_LOAD_DEVICE(DestroyShaderModule)
 
     // --- shared pipeline skeleton ---------------------------------------
     VkPipelineVertexInputStateCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
@@ -1216,6 +1208,8 @@ static bool buildPipelines(void) {
     tpci.subpass = 0;
     if (CreateGraphicsPipelines_fn(s_device, VK_NULL_HANDLE, 1, &tpci, nullptr, &s_triPipeline) != VK_SUCCESS) {
         snprintf(s_status, sizeof(s_status), "tri pipeline failed");
+        DestroyShaderModule_fn(s_device, triVert, nullptr);
+        DestroyShaderModule_fn(s_device, triFrag, nullptr);
         return false;
     }
 
@@ -1273,6 +1267,29 @@ static bool buildPipelines(void) {
         snprintf(s_status, sizeof(s_status), "quad pipeline failed");
         return false;
     }
+    DestroyShaderModule_fn(s_device, quadVert, nullptr);
+    DestroyShaderModule_fn(s_device, quadFrag, nullptr);
+    DestroyShaderModule_fn(s_device, triVert, nullptr);
+    DestroyShaderModule_fn(s_device, triFrag, nullptr);
+    return true;
+}
+
+// Build both child pipelines against the monitor view's cache renderpass,
+// plus the command pool and primary buffer that record each present loop.
+// Runs once at init — no more lazy first-frame building, no retry leaks.
+static bool buildPipelines(void) {
+    VK_LOAD_DEVICE(CreateCommandPool)
+    VK_LOAD_DEVICE(AllocateCommandBuffers)
+
+    // Renderpass compatibility: the drawable pass carries the same format +
+    // single-subpass shape the pipelines were designed against, so they run
+    // unchanged whether targeting a scene canvas or the window itself.
+    if (s_drawablePass == VK_NULL_HANDLE) {
+        snprintf(s_status, sizeof(s_status), "no drawable renderpass");
+        return false;
+    }
+    if (!buildTriQuad(s_drawablePass))
+        return false;
 
     // --- command plumbing --------------------------------------------------
     VkCommandPoolCreateInfo cpci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
@@ -1290,6 +1307,63 @@ static bool buildPipelines(void) {
 
     s_pipelinesBuilt = true;
     return true;
+}
+
+// Phase-3 live shader reload: rebuild tri/quad against the still-live
+// drawable pass with zero device/surface/window teardown. tex/sdf are
+// lazy-ensured on next draw, so nulling them schedules their rebuild for
+// free. Destroy-then-rebuild (not A/B) keeps VRAM flat; on failure the
+// pipelines stay down and present drops frames until the next retry —
+// the caller re-baselines its watcher only on success, so a bad .spv
+// retries instead of bricking the frame loop. Try-lock: a busy worker
+// wins the tick, reload retries 250ms later.
+bool Vk_reloadShaders(void) {
+    if (s_device == VK_NULL_HANDLE || s_drawablePass == VK_NULL_HANDLE)
+        return false;
+    VK_LOAD_DEVICE(DeviceWaitIdle)
+    VK_LOAD_DEVICE(DestroyPipeline)
+    VK_LOAD_DEVICE(DestroyPipelineLayout)
+    if (!SpinLock_tryLock(&s_presentLock))
+        return false;
+    DeviceWaitIdle_fn(s_device);
+    s_pipelinesBuilt = false;
+    if (s_triPipeline != VK_NULL_HANDLE) {
+        DestroyPipeline_fn(s_device, s_triPipeline, nullptr);
+        s_triPipeline = VK_NULL_HANDLE;
+    }
+    if (s_triLayout != VK_NULL_HANDLE) {
+        DestroyPipelineLayout_fn(s_device, s_triLayout, nullptr);
+        s_triLayout = VK_NULL_HANDLE;
+    }
+    if (s_quadPipeline != VK_NULL_HANDLE) {
+        DestroyPipeline_fn(s_device, s_quadPipeline, nullptr);
+        s_quadPipeline = VK_NULL_HANDLE;
+    }
+    if (s_quadLayout != VK_NULL_HANDLE) {
+        DestroyPipelineLayout_fn(s_device, s_quadLayout, nullptr);
+        s_quadLayout = VK_NULL_HANDLE;
+    }
+    if (s_texPipeline != VK_NULL_HANDLE) {
+        DestroyPipeline_fn(s_device, s_texPipeline, nullptr);
+        s_texPipeline = VK_NULL_HANDLE;
+    }
+    if (s_texLayout != VK_NULL_HANDLE) {
+        DestroyPipelineLayout_fn(s_device, s_texLayout, nullptr);
+        s_texLayout = VK_NULL_HANDLE;
+    }
+    if (s_sdfPipeline != VK_NULL_HANDLE) {
+        DestroyPipeline_fn(s_device, s_sdfPipeline, nullptr);
+        s_sdfPipeline = VK_NULL_HANDLE;
+    }
+    if (s_sdfLayout != VK_NULL_HANDLE) {
+        DestroyPipelineLayout_fn(s_device, s_sdfLayout, nullptr);
+        s_sdfLayout = VK_NULL_HANDLE;
+    }
+    bool ok = buildTriQuad(s_drawablePass);
+    s_pipelinesBuilt = ok;
+    SpinLock_unlock(&s_presentLock);
+    fprintf(stderr, "vk: shaders reloaded (%s)\n", ok ? "ok" : "FAILED");
+    return ok;
 }
 
 bool Vk_clearPresent(void) {
