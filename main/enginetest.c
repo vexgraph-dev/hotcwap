@@ -12,6 +12,7 @@
 
 #include <stdio.h>
 
+#include "annotation/overview.h"
 #include "engine/loop.h"
 #include "input/key.h"
 #include "window/window.h"
@@ -21,6 +22,27 @@ typedef struct {
     Loop loop;
     int frames;
 } EngineTest;
+
+;;OVERVIEW
+/**
+ * ============================================================================
+ * MODULE: EngineTest (main/enginetest.c — windowed engine demo)
+ * ============================================================================
+ * Showcase for the constructor-idiom Window API: construct hidden, mutate,
+ * show, run the fixed-timestep loop until Esc or close. Polls state only —
+ * event listeners live with their subsystems (see tests/window_test.c).
+ *
+ * STRUCT FIELDS (local to this file):
+ * ----------------------------------------------------------------------------
+ *   EngineTest { window, loop, frames } // Window + loop + frame counter
+ *
+ * FUNCTION REGISTRY:
+ * ----------------------------------------------------------------------------
+ * Core Functions:
+ *   - engine_tick(userdata)            : Poll events, stop on close/Esc
+ *   - main()                           : Build 800x600 window, run loop
+ * ============================================================================
+ */
 
 static EngineTest g_test = {0};
 

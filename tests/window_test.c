@@ -16,6 +16,7 @@
 
 #include <stdio.h>
 
+#include "annotation/overview.h"
 #include "engine/loop.h"
 #include "input/key.h"
 #include "input/mouse.h"
@@ -27,6 +28,34 @@ typedef struct {
     Loop loop;
     int frames;
 } win_ctx_t;
+
+;;OVERVIEW
+/**
+ * ============================================================================
+ * MODULE: WindowTest (tests/window_test.c — Window class _test)
+ * ============================================================================
+ * Two halves: one-shot chrome checks after create (title/size/constraints,
+ * resizable toggle, minimize/restore), then a stepped traffic-light tour
+ * held ~2s per combination for visible verification. Input listeners echo
+ * every key/mouse/scroll/move event the pipeline produces.
+ *
+ * STRUCT FIELDS (local to this file):
+ * ----------------------------------------------------------------------------
+ *   win_ctx_t { window, loop, frames } // Window + fixed-timestep loop state
+ *
+ * FUNCTION REGISTRY:
+ * ----------------------------------------------------------------------------
+ * Core Functions:
+ *   - on_key_down/up(self, keyEvent, nanos) : Key echo; Esc stops the loop
+ *   - on_mouse_down(self, mouseEvent, nanos) : Button/tap/position echo
+ *   - on_scroll(self, dx, dy)          : Scroll-delta echo
+ *   - on_move(self, x, y)              : Throttled (1/60) move echo
+ *   - greenLabel(step)                 : Fullscreen-vs-zoom label for a step
+ *   - applyStep(ctx, step)             : Apply one chrome combination
+ *   - win_tick(userdata)               : Per-frame event pump + frame count
+ *   - main()                           : Chrome checks + traffic-light tour
+ * ============================================================================
+ */
 
 static win_ctx_t *g_winCtx = nullptr;
 
