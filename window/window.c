@@ -38,7 +38,7 @@ void Window_destroy(Window *window) {
 ;;INCOMPLETE // Poll WM_QUIT; false until implemented.
 bool Window_shouldClose(Window *window) {
     (void) window;
-    return true;
+    return false;
 }
 
 ;;INCOMPLETE // PeekMessage/TranslateMessage/DispatchMessage loop; no-op until implemented.

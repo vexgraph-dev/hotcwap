@@ -35,10 +35,10 @@ void Window_destroy(Window *window) {
     (void) window;
 }
 
-;;INCOMPLETE // Check DestroyNotify; true until implemented.
+;;INCOMPLETE // Check DestroyNotify; false until implemented.
 bool Window_shouldClose(Window *window) {
     (void) window;
-    return true;
+    return false;
 }
 
 ;;INCOMPLETE // XPending/XNextEvent loop; no-op until implemented.

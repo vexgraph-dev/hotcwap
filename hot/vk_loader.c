@@ -34,6 +34,7 @@ static VkModuleGetManifestFn s_module_get_manifest = NULL;
 #define MAX_TRAMPOLINES 64
 typedef struct {
     _Atomic(void*) ptr;
+    _Atomic(void*) fallback_ptr;
     char name[64];
 } Trampoline;
 
@@ -55,13 +56,84 @@ static int trampoline_create(const char *name) {
     strncpy(s_trampolines[idx].name, name, 63);
     s_trampolines[idx].name[63] = '\0';
     atomic_store(&s_trampolines[idx].ptr, NULL);
+    atomic_store(&s_trampolines[idx].fallback_ptr, NULL);
     return (int)idx;
 }
 
 void *hot_vk_get_symbol(const char *name) {
     int idx = trampoline_find(name);
     if (idx < 0) return NULL;
-    return atomic_load(&s_trampolines[idx].ptr);
+    void *ptr = atomic_load(&s_trampolines[idx].ptr);
+    if (!ptr) {
+        for (int retry = 0; retry < 4 && !ptr; retry++) {
+            #if defined(__aarch64__)
+            __asm__ volatile("yield");
+            #endif
+            ptr = atomic_load(&s_trampolines[idx].ptr);
+        }
+        if (!ptr) {
+            ptr = atomic_load(&s_trampolines[idx].fallback_ptr);
+        }
+    }
+    return ptr;
+}
+
+// Generational handle retirement: keeps old dylib handles alive across
+// reload generations to prevent race conditions during module reload.
+#define VK_RETIRED_MAX 16
+#define VK_RETIRED_GENERATIONS 4
+
+typedef struct {
+    void *handle;
+    uint32_t generation;
+} VkRetiredHandle;
+
+static VkRetiredHandle s_vk_retired[VK_RETIRED_MAX] = {0};
+static uint32_t s_vk_generation = 0;
+
+static void vk_retire_handle(void *handle) {
+    if (!handle) return;
+
+    for (size_t i = 0; i < VK_RETIRED_MAX; i++) {
+        if (s_vk_retired[i].handle && (s_vk_generation - s_vk_retired[i].generation >= VK_RETIRED_GENERATIONS)) {
+            dlclose(s_vk_retired[i].handle);
+            s_vk_retired[i].handle = NULL;
+        }
+    }
+
+    size_t slot = VK_RETIRED_MAX;
+    for (size_t i = 0; i < VK_RETIRED_MAX; i++) {
+        if (!s_vk_retired[i].handle) {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot == VK_RETIRED_MAX) {
+        size_t oldest_idx = 0;
+        uint32_t oldest_gen = UINT32_MAX;
+        for (size_t i = 0; i < VK_RETIRED_MAX; i++) {
+            if (s_vk_retired[i].generation < oldest_gen) {
+                oldest_gen = s_vk_retired[i].generation;
+                oldest_idx = i;
+            }
+        }
+        dlclose(s_vk_retired[oldest_idx].handle);
+        slot = oldest_idx;
+    }
+
+    s_vk_retired[slot].handle = handle;
+    s_vk_retired[slot].generation = s_vk_generation;
+}
+
+static void vk_advance_generation(void) {
+    s_vk_generation++;
+    for (size_t i = 0; i < VK_RETIRED_MAX; i++) {
+        if (s_vk_retired[i].handle && (s_vk_generation - s_vk_retired[i].generation >= VK_RETIRED_GENERATIONS)) {
+            dlclose(s_vk_retired[i].handle);
+            s_vk_retired[i].handle = NULL;
+        }
+    }
 }
 
 // Initialize the Vulkan loader — creates the device
@@ -89,7 +161,8 @@ bool hot_vk_load_module(const char *path) {
     if (s_module_handle) {
         // Shutdown old module first
         if (s_module_shutdown) s_module_shutdown();
-        dlclose(s_module_handle);
+        vk_retire_handle(s_module_handle);
+        vk_advance_generation();
         s_module_handle = NULL;
         s_initialized = false;
     }
@@ -146,6 +219,10 @@ bool hot_vk_load_module(const char *path) {
         int idx = trampoline_find(trampolines[i].name);
         if (idx < 0) idx = trampoline_create(trampolines[i].name);
         if (idx >= 0) {
+            void *old = atomic_load(&s_trampolines[idx].ptr);
+            if (old && old != trampolines[i].function) {
+                atomic_store(&s_trampolines[idx].fallback_ptr, old);
+            }
             atomic_store(&s_trampolines[idx].ptr, trampolines[i].function);
         }
     }
@@ -161,6 +238,12 @@ void hot_vk_shutdown(void) {
     if (s_module_handle) {
         dlclose(s_module_handle);
         s_module_handle = NULL;
+    }
+    for (size_t i = 0; i < VK_RETIRED_MAX; i++) {
+        if (s_vk_retired[i].handle) {
+            dlclose(s_vk_retired[i].handle);
+            s_vk_retired[i].handle = NULL;
+        }
     }
     s_initialized = false;
     

@@ -48,6 +48,7 @@ typedef struct HotModule {
 // Trampoline table entry — one per exported function
 typedef struct {
     _Atomic(void*) ptr;             // atomic function pointer
+    _Atomic(void*) fallback_ptr;    // prior generation pointer for mid-swap resilience
     char name[HOT_MANIFEST_MAX_NAME];
 } HotTrampoline;
 
@@ -62,18 +63,37 @@ static int trampoline_register(const char *name) {
     strncpy(s_trampolines[idx].name, name, HOT_MANIFEST_MAX_NAME - 1);
     s_trampolines[idx].name[HOT_MANIFEST_MAX_NAME - 1] = '\0';
     atomic_store(&s_trampolines[idx].ptr, NULL);
+    atomic_store(&s_trampolines[idx].fallback_ptr, NULL);
     return (int)idx;
 }
 
-// Get a trampoline's current function pointer.
+// Get a trampoline's current function pointer, falling back to prior generation on mid-swap NULL.
 static void *trampoline_get(int idx) {
     if (idx < 0 || idx >= (int)atomic_load(&s_trampoline_count)) return NULL;
-    return atomic_load(&s_trampolines[idx].ptr);
+    void *ptr = atomic_load(&s_trampolines[idx].ptr);
+    if (!ptr) {
+        // Poll briefly in case atomic swap is in-flight
+        for (int retry = 0; retry < 4 && !ptr; retry++) {
+            #if defined(__aarch64__)
+            __asm__ volatile("yield");
+            #endif
+            ptr = atomic_load(&s_trampolines[idx].ptr);
+        }
+        // Fall back to prior generation rather than returning NULL and crashing caller
+        if (!ptr) {
+            ptr = atomic_load(&s_trampolines[idx].fallback_ptr);
+        }
+    }
+    return ptr;
 }
 
 // Set a trampoline's function pointer atomically.
 static void trampoline_set(int idx, void *ptr) {
     if (idx < 0 || idx >= (int)atomic_load(&s_trampoline_count)) return;
+    void *old = atomic_load(&s_trampolines[idx].ptr);
+    if (old && old != ptr) {
+        atomic_store(&s_trampolines[idx].fallback_ptr, old);
+    }
     atomic_store(&s_trampolines[idx].ptr, ptr);
 }
 
@@ -402,7 +422,12 @@ HotResult Hot_poll(HotModule *hot, uint32_t *loaded_count) {
         
         // Build full path
         char path[HOT_PATH_LEN];
-        snprintf(path, sizeof(path), "%s/%s", (*hot).hot_dir, name);
+        int path_len = snprintf(path, sizeof(path), "%s/%s", (*hot).hot_dir, name);
+        if (path_len < 0 || (size_t)path_len >= sizeof(path)) {
+            fprintf(stderr, "[hot] ERROR: Module path '%s/%s' truncated (exceeds %d bytes)\n",
+                    (*hot).hot_dir, name, HOT_PATH_LEN);
+            continue;
+        }
         
         // Check if this is a new or updated module
         time_t mtime = file_mtime(path);
@@ -412,7 +437,9 @@ HotResult Hot_poll(HotModule *hot, uint32_t *loaded_count) {
             // New module — add it
             if ((*hot).module_count >= HOT_MAX_MODULES) {
                 snprintf((*hot).last_error, sizeof((*hot).last_error),
-                         "Too many modules");
+                         "Too many modules (limit %d reached)", HOT_MAX_MODULES);
+                fprintf(stderr, "[hot] ERROR: HOT_MAX_MODULES (%d) exceeded, skipping module '%s'\n",
+                        HOT_MAX_MODULES, mod_name);
                 continue;
             }
             mod = &(*hot).modules[(*hot).module_count++];
@@ -432,7 +459,12 @@ HotResult Hot_poll(HotModule *hot, uint32_t *loaded_count) {
         
         // Clone the dylib first (so we can verify before committing)
         char clone_path[HOT_PATH_LEN];
-        snprintf(clone_path, sizeof(clone_path), "%s/.%s.clone", (*hot).hot_dir, name);
+        int clone_len = snprintf(clone_path, sizeof(clone_path), "%s/.%s.clone", (*hot).hot_dir, name);
+        if (clone_len < 0 || (size_t)clone_len >= sizeof(clone_path)) {
+            fprintf(stderr, "[hot] ERROR: Clone path '%s/.%s.clone' truncated (exceeds %d bytes)\n",
+                    (*hot).hot_dir, name, HOT_PATH_LEN);
+            continue;
+        }
         
         if (!file_copy(path, clone_path)) {
             snprintf((*hot).last_error, sizeof((*hot).last_error),
