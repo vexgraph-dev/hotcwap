@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 4.3)
+cmake_minimum_required(VERSION 3.28)
 project(hotcwap C)
 
 set(CMAKE_C_STANDARD 23)
@@ -10,6 +10,7 @@ if(APPLE)
     set(CMAKE_OBJC_STANDARD_REQUIRED ON)
 endif()
 
+if(NOT TARGET hotcwap)
 # The OS-stable layer: hot-reload machinery + the OS-agnostic window.
 # A window never hot-updates — it is owned by the OS — so it lives here,
 # next to the loader that persists across module swaps.
@@ -22,8 +23,11 @@ add_library(hotcwap STATIC
 target_include_directories(hotcwap PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(hotcwap PRIVATE -Wall -Wextra -Werror -mcpu=native)
 
-# Vulkan headers: prefer a local SDK, fall back to Homebrew layout.
-if(EXISTS "/opt/homebrew/include/vulkan/vulkan.h")
+# Vulkan headers: prefer SDK / find_package, fall back to Homebrew layout.
+find_package(Vulkan QUIET)
+if(Vulkan_FOUND)
+    target_include_directories(hotcwap PUBLIC ${Vulkan_INCLUDE_DIRS})
+elseif(EXISTS "/opt/homebrew/include/vulkan/vulkan.h")
     target_include_directories(hotcwap PUBLIC /opt/homebrew/include)
 endif()
 
@@ -65,3 +69,4 @@ elseif(WIN32)
 elseif(UNIX)
     target_sources(hotcwap PRIVATE window/window_linux.c)
 endif()
+endif() # NOT TARGET hotcwap

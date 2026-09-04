@@ -82,7 +82,7 @@ Window *Window_3(const char *title, int width, int height);
 #define WINDOW_CHOOSER(_0, _1, _2, _3, NAME, ...) NAME
 
 #define Window(...) WINDOW_CHOOSER( \
-    dummy, ##__VA_ARGS__,           \
+    dummy __VA_OPT__(,) __VA_ARGS__, \
     Window_3, Window_2, Window_1, Window_0 \
 )(__VA_ARGS__)
 
