@@ -1123,8 +1123,11 @@ void Window_compositeIOSurfaceChildren(Window *window, Panel *contentPanel) {
             CALayer *childLayer = (__bridge CALayer*) PanelCocoa_layer(pc);
             if (!childLayer) continue;
 
-            // Surface is pre-rendered at native pixel resolution — tell CA not to scale it.
-            childLayer.contentsScale = 1.0;
+            // Surface is pre-rendered at native pixel resolution — match backingScaleFactor
+            // so CoreAnimation displays it at 1:1 logical points instead of double size on Retina.
+            CGFloat scale = [nsWindow backingScaleFactor];
+            if (scale <= 0.0) scale = 1.0;
+            childLayer.contentsScale = scale;
 
             // Apply anchor settings to layer (contentsGravity + autoresizingMask)
             int parentAnchor = anti_GetChildParentAnchor(child);
