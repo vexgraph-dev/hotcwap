@@ -36,13 +36,48 @@ static const char *skip_ws(const char *p) {
     return p;
 }
 
-// Parse a JSON string (simplified — no escape handling for now)
+// Parse a JSON string with escape sequence handling (\", \\, \n, \t, \uXXXX)
 static const char *parse_string(const char *p, char *out, size_t out_size) {
     if (*p != '"') return NULL;
     p++;
     size_t i = 0;
     while (*p && *p != '"' && i < out_size - 1) {
-        out[i++] = *p++;
+        if (*p == '\\') {
+            p++;
+            if (!*p) break;
+            if (*p == '"') { out[i++] = '"'; p++; }
+            else if (*p == '\\') { out[i++] = '\\'; p++; }
+            else if (*p == '/') { out[i++] = '/'; p++; }
+            else if (*p == 'b') { out[i++] = '\b'; p++; }
+            else if (*p == 'f') { out[i++] = '\f'; p++; }
+            else if (*p == 'n') { out[i++] = '\n'; p++; }
+            else if (*p == 'r') { out[i++] = '\r'; p++; }
+            else if (*p == 't') { out[i++] = '\t'; p++; }
+            else if (*p == 'u') {
+                p++;
+                uint32_t u = 0;
+                for (int h = 0; h < 4 && *p; h++, p++) {
+                    u <<= 4;
+                    if (*p >= '0' && *p <= '9') u |= (uint32_t) (*p - '0');
+                    else if (*p >= 'a' && *p <= 'f') u |= (uint32_t) (*p - 'a' + 10);
+                    else if (*p >= 'A' && *p <= 'F') u |= (uint32_t) (*p - 'A' + 10);
+                }
+                if (u < 0x80) {
+                    out[i++] = (char) u;
+                } else if (u < 0x800 && i + 1 < out_size - 1) {
+                    out[i++] = (char) (0xC0 | (u >> 6));
+                    out[i++] = (char) (0x80 | (u & 0x3F));
+                } else if (i + 2 < out_size - 1) {
+                    out[i++] = (char) (0xE0 | (u >> 12));
+                    out[i++] = (char) (0x80 | ((u >> 6) & 0x3F));
+                    out[i++] = (char) (0x80 | (u & 0x3F));
+                }
+            } else {
+                out[i++] = *p++;
+            }
+        } else {
+            out[i++] = *p++;
+        }
     }
     out[i] = '\0';
     if (*p == '"') p++;

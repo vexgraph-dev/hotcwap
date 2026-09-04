@@ -59,7 +59,7 @@ typedef struct {
     char name[HOT_MANIFEST_MAX_NAME];
     char path[HOT_PATH_LEN];
     void *handle;                    // dlopen handle
-    time_t last_modified;            // last file modification time
+    uint64_t last_modified;        // last file modification timestamp (ns) + size
     HotManifest manifest;            // current manifest
     bool loaded;                     // is currently loaded
 } HotModuleInternal;
@@ -191,11 +191,21 @@ static void hot_advance_generation(void) {
     }
 }
 
-// Get file modification time
-static time_t file_mtime(const char *path) {
+// Get file modification time with nanosecond precision + file size
+static uint64_t file_mtime(const char *path) {
     struct stat st;
     if (stat(path, &st) != 0) return 0;
-    return st.st_mtime;
+#if defined(__APPLE__)
+    uint64_t sec = (uint64_t) st.st_mtimespec.tv_sec;
+    uint64_t nsec = (uint64_t) st.st_mtimespec.tv_nsec;
+#elif defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 200809L
+    uint64_t sec = (uint64_t) st.st_mtim.tv_sec;
+    uint64_t nsec = (uint64_t) st.st_mtim.tv_nsec;
+#else
+    uint64_t sec = (uint64_t) st.st_mtime;
+    uint64_t nsec = 0;
+#endif
+    return (sec * 1000000000ULL) + nsec + (uint64_t) st.st_size;
 }
 
 // Check if a file exists
@@ -455,7 +465,7 @@ HotResult Hot_poll(HotModule *hot, uint32_t *loaded_count) {
         }
         
         // Check if this is a new or updated module
-        time_t mtime = file_mtime(path);
+        uint64_t mtime = file_mtime(path);
         HotModuleInternal *mod = find_module(hot, mod_name);
         
         if (!mod) {

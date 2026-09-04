@@ -21,14 +21,27 @@ add_library(hotcwap STATIC
     vulkan/vulkan.c
 )
 target_include_directories(hotcwap PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_options(hotcwap PRIVATE -Wall -Wextra -Werror -mcpu=native)
+target_compile_options(hotcwap PRIVATE -Wall -Wextra -Werror)
 
-# Vulkan headers: prefer SDK / find_package, fall back to Homebrew layout.
+# Vulkan headers: prefer find_package, fall back to brew --prefix
 find_package(Vulkan QUIET)
+if(NOT Vulkan_FOUND AND APPLE)
+    execute_process(COMMAND brew --prefix OUTPUT_VARIABLE BREW_PREFIX OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(BREW_PREFIX AND EXISTS "${BREW_PREFIX}/include/vulkan/vulkan.h")
+        set(Vulkan_INCLUDE_DIRS "${BREW_PREFIX}/include")
+        set(Vulkan_FOUND TRUE)
+    endif()
+endif()
 if(Vulkan_FOUND)
     target_include_directories(hotcwap PUBLIC ${Vulkan_INCLUDE_DIRS})
-elseif(EXISTS "/opt/homebrew/include/vulkan/vulkan.h")
-    target_include_directories(hotcwap PUBLIC /opt/homebrew/include)
+endif()
+
+# Dynamic module sample: compiled into runtime dylib
+add_library(vk_module MODULE hot/vk_module.c)
+target_include_directories(vk_module PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(vk_module PRIVATE -Wall -Wextra -Werror)
+if(Vulkan_FOUND)
+    target_include_directories(vk_module PUBLIC ${Vulkan_INCLUDE_DIRS})
 endif()
 
 # Check if vexspoke is already available as a target (parent build)
