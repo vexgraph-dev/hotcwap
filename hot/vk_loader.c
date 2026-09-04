@@ -182,12 +182,38 @@ bool hot_vk_init_loader(VkInstance instance, VkPhysicalDevice phys,
     s_queue = queue;
     s_queue_family = queue_family;
     
-    // Create pipeline cache
+    // Create pipeline cache, seeded from disk when a prior run saved one.
+    // The cache blob is driver-versioned: vkCreatePipelineCache rejects
+    // stale data itself, so a corrupt/mismatched file just falls back to
+    // an empty cache — never a fatal error.
+    uint8_t *cache_data = nullptr;
+    size_t cache_size = 0;
+    FILE *cache_in = fopen("hot/.pipeline_cache", "rb");
+    if (cache_in) {
+        fseek(cache_in, 0, SEEK_END);
+        long cache_len = ftell(cache_in);
+        fseek(cache_in, 0, SEEK_SET);
+        if (cache_len > 0 && cache_len < 16 * 1024 * 1024) {
+            cache_data = (uint8_t*) malloc((size_t) cache_len);
+            if (cache_data) {
+                if (fread(cache_data, 1, (size_t) cache_len, cache_in) == (size_t) cache_len)
+                    cache_size = (size_t) cache_len;
+                else {
+                    free(cache_data);
+                    cache_data = nullptr;
+                }
+            }
+        }
+        fclose(cache_in);
+    }
     VkPipelineCacheCreateInfo cache_ci = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+        .initialDataSize = cache_size,
+        .pInitialData = cache_data,
     };
-    // TODO: load cache from disk if exists
     vkCreatePipelineCache(s_device, &cache_ci, NULL, &s_cache);
+    if (cache_data)
+        free(cache_data);
     
     printf("[vk_loader] initialized (device=%p)\n", (void*) s_device);
     return true;
@@ -284,9 +310,23 @@ void hot_vk_shutdown(void) {
     }
     s_initialized = false;
     
-    // Destroy pipeline cache
+    // Persist + destroy pipeline cache. vkGetPipelineCacheData sizes the
+    // blob; a zero size or error simply skips the write.
     if (s_cache) {
-        // TODO: save cache to disk
+        size_t data_size = 0;
+        if (vkGetPipelineCacheData(s_device, s_cache, &data_size, nullptr) == VK_SUCCESS && data_size > 0) {
+            uint8_t *data = (uint8_t*) malloc(data_size);
+            if (data) {
+                if (vkGetPipelineCacheData(s_device, s_cache, &data_size, data) == VK_SUCCESS) {
+                    FILE *cache_out = fopen("hot/.pipeline_cache", "wb");
+                    if (cache_out) {
+                        fwrite(data, 1, data_size, cache_out);
+                        fclose(cache_out);
+                    }
+                }
+                free(data);
+            }
+        }
         vkDestroyPipelineCache(s_device, s_cache, NULL);
         s_cache = VK_NULL_HANDLE;
     }
