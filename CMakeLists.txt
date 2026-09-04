@@ -17,6 +17,7 @@ add_library(hotcwap STATIC
     hot/hot.c
     hot/manifest.c
     hot/vk_loader.c
+    vulkan/vulkan.c
 )
 target_include_directories(hotcwap PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(hotcwap PRIVATE -Wall -Wextra -Werror -mcpu=native)
@@ -47,13 +48,17 @@ endif()
 
 # OS window backend: Cocoa shim on macOS, platform stubs elsewhere.
 if(APPLE)
-    target_sources(hotcwap PRIVATE objc/window_cocoa.m)
+    target_sources(hotcwap PRIVATE
+        objc/window_cocoa.m
+        vulkan/vulkan_mac.c
+    )
     set_source_files_properties(objc/window_cocoa.m PROPERTIES
         COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(hotcwap PUBLIC
         "-framework Cocoa"
         "-framework AppKit"
         "-framework QuartzCore"
+        "-framework Metal"
     )
 elseif(WIN32)
     target_sources(hotcwap PRIVATE window/window.c)
