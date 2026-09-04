@@ -59,6 +59,19 @@ if(Vulkan_FOUND)
     target_include_directories(vk_module PUBLIC ${Vulkan_INCLUDE_DIRS})
 endif()
 
+# Phase-1 L2 behavior subject: pure pulse/bar math + texture path.
+# Host handlers delegate here; module holds no GPU/Panel state so swap is
+# safe by construction. Output lands in ${CMAKE_BINARY_DIR}/hot next to
+# vk_test's watch dir; copy to ./hot/ when running from the source root.
+add_library(hot_behavior MODULE hot/hot_behavior.c)
+target_include_directories(hot_behavior PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../vexspoke/src)
+target_compile_options(hot_behavior PRIVATE -Wall -Wextra -Werror)
+set_target_properties(hot_behavior PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/hot"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/hot")
+
 # Check if vexspoke is already available as a target (parent build)
 if(NOT TARGET vexspoke)
     option(HOTCWAP_USE_VEXSPOKE "Depend on vexspoke core via FetchContent" OFF)
