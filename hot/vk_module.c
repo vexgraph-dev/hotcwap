@@ -42,11 +42,11 @@
 // because it's owned by the loader, not by this module.
 
 // Module state (recreated on reload)
-static VkPipeline s_pipeline = VK_NULL_HANDLE;
-static VkPipelineLayout s_pipeline_layout = VK_NULL_HANDLE;
-static VkRenderPass s_render_pass = VK_NULL_HANDLE;
-static VkFramebuffer s_framebuffers[8];
-static uint32_t s_framebuffer_count = 0;
+[[maybe_unused]] static VkPipeline s_pipeline = VK_NULL_HANDLE;
+[[maybe_unused]] static VkPipelineLayout s_pipeline_layout = VK_NULL_HANDLE;
+[[maybe_unused]] static VkRenderPass s_render_pass = VK_NULL_HANDLE;
+[[maybe_unused]] static VkFramebuffer s_framebuffers[8];
+[[maybe_unused]] static uint32_t s_framebuffer_count = 0;
 
 // Trampoline table — atomically swapped on reload
 static VkTrampolineEntry s_trampolines[16];
@@ -62,7 +62,7 @@ static void register_trampoline(const char *name, void *fn) {
 }
 
 // Get a trampoline by name
-static void *get_trampoline(const char *name) {
+[[maybe_unused]] static void *get_trampoline(const char *name) {
     for (uint32_t i = 0; i < s_trampoline_count; i++) {
         if (strcmp(s_trampolines[i].name, name) == 0) {
             return s_trampolines[i].function;
@@ -104,11 +104,14 @@ static void vk_end_frame(void) {
 }
 
 static void vk_draw_rect(float x, float y, float w, float h, float r, float g, float b, float a) {
+    (void) x; (void) y; (void) w; (void) h;
+    (void) r; (void) g; (void) b; (void) a;
     // Record a rect draw command
     // ...
 }
 
 static void vk_draw_texture(int32_t tex_id, float x, float y, float w, float h, int mode) {
+    (void) tex_id; (void) x; (void) y; (void) w; (void) h; (void) mode;
     // Record a texture draw command
     // ...
 }
