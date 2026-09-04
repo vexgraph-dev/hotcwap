@@ -25,6 +25,7 @@ if(NOT TARGET hotcwap)
 # A window never hot-updates — it is owned by the OS — so it lives here,
 # next to the loader that persists across module swaps.
 add_library(hotcwap STATIC
+    app/application.c
     hot/hot.c
     hot/manifest.c
     hot/vk_loader.c
