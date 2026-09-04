@@ -105,12 +105,12 @@ bool HotManifest_parse(const char *json, size_t len, HotManifest *out) {
             char value[64];
             bool is_hex;
             p = parse_value(p, value, sizeof(value), NULL, &is_hex);
-            strncpy(out->name, value, HOT_MANIFEST_MAX_NAME - 1);
+            strncpy((*out).name, value, HOT_MANIFEST_MAX_NAME - 1);
         } else if (strcmp(key, "version") == 0) {
             char value[64];
             bool is_hex;
             p = parse_value(p, value, sizeof(value), NULL, &is_hex);
-            strncpy(out->version, value, HOT_MANIFEST_MAX_VERSION - 1);
+            strncpy((*out).version, value, HOT_MANIFEST_MAX_VERSION - 1);
         } else if (strcmp(key, "type_ids") == 0) {
             // Expect array
             if (*p != '[') return false;
@@ -161,8 +161,8 @@ bool HotManifest_parse(const char *json, size_t len, HotManifest *out) {
                 if (*p != '}') return false;
                 p++;
                 
-                if (out->type_id_count < HOT_MANIFEST_MAX_TYPE_IDS) {
-                    out->type_ids[out->type_id_count++] = tid;
+                if ((*out).type_id_count < HOT_MANIFEST_MAX_TYPE_IDS) {
+                    (*out).type_ids[(*out).type_id_count++] = tid;
                 }
             }
         } else if (strcmp(key, "exports") == 0) {
@@ -177,9 +177,9 @@ bool HotManifest_parse(const char *json, size_t len, HotManifest *out) {
                 bool is_hex;
                 p = parse_value(p, value, sizeof(value), NULL, &is_hex);
                 
-                if (out->export_count < HOT_MANIFEST_MAX_EXPORTS) {
-                    strncpy(out->exports[out->export_count].name, value, HOT_MANIFEST_MAX_NAME - 1);
-                    out->export_count++;
+                if ((*out).export_count < HOT_MANIFEST_MAX_EXPORTS) {
+                    strncpy((*out).exports[(*out).export_count].name, value, HOT_MANIFEST_MAX_NAME - 1);
+                    (*out).export_count++;
                 }
             }
         } else if (strcmp(key, "dependencies") == 0) {
@@ -194,9 +194,9 @@ bool HotManifest_parse(const char *json, size_t len, HotManifest *out) {
                 bool is_hex;
                 p = parse_value(p, value, sizeof(value), NULL, &is_hex);
                 
-                if (out->dependency_count < HOT_MANIFEST_MAX_DEPENDENCIES) {
-                    strncpy(out->dependencies[out->dependency_count].name, value, HOT_MANIFEST_MAX_NAME - 1);
-                    out->dependency_count++;
+                if ((*out).dependency_count < HOT_MANIFEST_MAX_DEPENDENCIES) {
+                    strncpy((*out).dependencies[(*out).dependency_count].name, value, HOT_MANIFEST_MAX_NAME - 1);
+                    (*out).dependency_count++;
                 }
             }
         } else {
@@ -225,9 +225,9 @@ bool HotManifest_compatible(const HotManifest *old_manifest, const HotManifest *
     if (!old_manifest || !new_manifest) return false;
     
     // Check that all type_ids in the old manifest exist in the new one with the same value
-    for (uint32_t i = 0; i < old_manifest->type_id_count; i++) {
-        uint32_t new_val = HotManifest_get_type_id(new_manifest, old_manifest->type_ids[i].name);
-        if (new_val != old_manifest->type_ids[i].value) {
+    for (uint32_t i = 0; i < (*old_manifest).type_id_count; i++) {
+        uint32_t new_val = HotManifest_get_type_id(new_manifest, (*old_manifest).type_ids[i].name);
+        if (new_val != (*old_manifest).type_ids[i].value) {
             return false;
         }
     }
@@ -238,9 +238,9 @@ bool HotManifest_compatible(const HotManifest *old_manifest, const HotManifest *
 uint32_t HotManifest_get_type_id(const HotManifest *manifest, const char *name) {
     if (!manifest || !name) return 0;
     
-    for (uint32_t i = 0; i < manifest->type_id_count; i++) {
-        if (strcmp(manifest->type_ids[i].name, name) == 0) {
-            return manifest->type_ids[i].value;
+    for (uint32_t i = 0; i < (*manifest).type_id_count; i++) {
+        if (strcmp((*manifest).type_ids[i].name, name) == 0) {
+            return (*manifest).type_ids[i].value;
         }
     }
     
