@@ -55,4 +55,21 @@ HotFn Hot_get_symbol(HotModule *hot, const char *name);
 // Get the last error string (for diagnostics).
 const char *Hot_last_error(HotModule *hot);
 
+// Phase-1 lifecycle: graceful per-module teardown + state handoff.
+// Shutdown calls the module's Hot_shutdown_module (if exported) on the
+// currently loaded handle. Save/Restore move an opaque state blob across
+// a swap: Hot_poll saves from the old handle before dlopen and restores
+// into the new handle after Hot_init_module. Modules without Hot_save /
+// Hot_restore simply skip the handoff. Returns false when the module is
+// unknown, unloaded, or the symbol is missing / buffer too small.
+void Hot_shutdown_module(HotModule *hot, const char *module_name);
+bool Hot_save_module(HotModule *hot, const char *module_name, void *buf, size_t cap, size_t *outLen);
+bool Hot_restore_module(HotModule *hot, const char *module_name, const void *buf, size_t len);
+
+// Phase-2 migration: translate a state blob saved by oldVersion into the
+// current module's schema. Calls the module's Hot_migrate export; false
+// when the module is unknown or exports no migrator.
+bool Hot_migrate_module(HotModule *hot, const char *module_name, const char *oldVersion,
+                        const void *oldBuf, size_t oldLen, void *newBuf, size_t newCap, size_t *outLen);
+
 #endif

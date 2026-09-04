@@ -54,6 +54,10 @@
  * Core Functions:
  *   - HotShutdown(hot)
  *   - Hot_poll(hot, loaded_count)
+ *   - Hot_shutdown_module(hot, module_name)
+ *   - Hot_save_module(hot, module_name, buf, cap, outLen)
+ *   - Hot_restore_module(hot, module_name, buf, len)
+ *   - Hot_migrate_module(hot, module_name, oldVersion, oldBuf, oldLen, newBuf, newCap, outLen)
  *
  * Getters:
  *   - Hot_get_api(hot, module_name)
@@ -153,6 +157,22 @@ static HotModuleInternal *find_module(HotModule *hot, const char *name) {
     return NULL;
 }
 
+// Phase-1: dependency gate. Every entry in new_manifest.dependencies must
+// already be loaded (except a self-reference). Scan order from readdir is
+// arbitrary, so a missing dep fails THIS poll and retries on the next one
+// once the dependency has loaded.
+static bool dependencies_met(HotModule *hot, const HotManifest *new_manifest, const char *self) {
+    for (uint32_t i = 0; i < (*new_manifest).dependency_count; i++) {
+        const char *dep = (*new_manifest).dependencies[i].name;
+        if (self && strcmp(dep, self) == 0)
+            continue;
+        HotModuleInternal *found = find_module(hot, dep);
+        if (!found || !(*found).loaded)
+            return false;
+    }
+    return true;
+}
+
 HotModule *Hot_init(const char *hot_dir) {
     if (!hot_dir) return NULL;
     
@@ -185,6 +205,10 @@ void HotShutdown(HotModule *hot) {
     for (uint32_t i = 0; i < (*hot).module_count; i++) {
         HotModuleInternal *mod = &(*hot).modules[i];
         if ((*mod).handle) {
+            typedef void (*ShutdownFn)(void);
+            ShutdownFn shutdown = (ShutdownFn) dlsym((*mod).handle, "Hot_shutdown_module");
+            if (shutdown)
+                shutdown();
             dlclose((*mod).handle);
             (*mod).handle = NULL;
             (*mod).loaded = false;
@@ -275,6 +299,28 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
         }
     }
 
+    // 4b. Phase-1: dependency gate (missing dep = retry next poll).
+    if (!dependencies_met(hot, &new_manifest, (*mod).name)) {
+        snprintf((*hot).last_error, sizeof((*hot).last_error),
+                 "missing dependency for module %s", (*mod).name);
+        dlclose(handle);
+        return HOT_ERROR_FILE_NOT_FOUND;
+    }
+
+    // 4c. Phase-1: save old state before the swap (best-effort, 256 bytes
+    // covers the Phase-2 tunables; larger modules skip when too small).
+    uint8_t saved[256];
+    size_t saved_len = 0;
+    if ((*mod).loaded && (*mod).handle) {
+        typedef bool (*SaveFn)(void*, size_t, size_t*);
+        SaveFn save = (SaveFn) dlsym((*mod).handle, "Hot_save");
+        if (save) {
+            size_t out = 0;
+            if (save(saved, sizeof(saved), &out) && out <= sizeof(saved))
+                saved_len = out;
+        }
+    }
+    
     // 5. Call the module's init function
     typedef bool (*InitFn)(void);
     InitFn init = (InitFn)dlsym(handle, "Hot_init_module");
@@ -287,7 +333,12 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
         }
     }
     
-    // 6. Register trampolines for all exports
+    // 6. Register trampolines for all exports, with rollback snapshot.
+    // A mid-list dlsym failure used to leave a half-swapped table; now
+    // every touched entry restores its prior pointer on error.
+    int touched_idx[HOT_MANIFEST_MAX_EXPORTS];
+    void *touched_old[HOT_MANIFEST_MAX_EXPORTS];
+    uint32_t touched_count = 0;
     for (uint32_t i = 0; i < new_manifest.export_count; i++) {
         const char *export_name = new_manifest.exports[i].name;
 
@@ -298,6 +349,8 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
             if (tidx < 0) {
                 snprintf((*hot).last_error, sizeof((*hot).last_error),
                          "Too many trampolines");
+                for (uint32_t r = 0; r < touched_count; r++)
+                    HotTrampolineTable_set(table, touched_idx[r], touched_old[r]);
                 dlclose(handle);
                 return HOT_ERROR_OUT_OF_MEMORY;
             }
@@ -308,16 +361,59 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
         if (!fn) {
             snprintf((*hot).last_error, sizeof((*hot).last_error),
                      "dlsym(%s) failed: %s", export_name, dlerror());
+            for (uint32_t r = 0; r < touched_count; r++)
+                HotTrampolineTable_set(table, touched_idx[r], touched_old[r]);
             dlclose(handle);
             return HOT_ERROR_DLSYM_FAILED;
         }
 
-        // Atomic swap of the trampoline
+        // Snapshot prior pointer, then atomic swap of the trampoline
+        void *old = HotTrampolineTable_get(table, tidx);
+        if (touched_count < HOT_MANIFEST_MAX_EXPORTS) {
+            touched_idx[touched_count] = tidx;
+            touched_old[touched_count] = old;
+            touched_count++;
+        }
         HotTrampolineTable_set(table, tidx, fn);
     }
 
-    // 7. Update module state
+    // 6b. Phase-2: restore saved state into the new module. Same version
+    // takes the direct path; a version bump routes through Hot_migrate so
+    // additive struct growth (v1 8B -> v2 12B) survives the swap. A module
+    // without Hot_migrate keeps the direct path only when sizes allow —
+    // Hot_restore itself decides (see hot_behavior.c: it accepts both).
+    if (saved_len > 0) {
+        bool restored = false;
+        if (strcmp((*mod).manifest.version, new_manifest.version) != 0) {
+            typedef bool (*MigrateFn)(const char*, const void*, size_t, void*, size_t, size_t*);
+            MigrateFn migrate = (MigrateFn) dlsym(handle, "Hot_migrate");
+            if (migrate) {
+                uint8_t migrated[256];
+                size_t migrated_len = 0;
+                if (migrate((*mod).manifest.version, saved, saved_len,
+                            migrated, sizeof(migrated), &migrated_len)) {
+                    typedef bool (*RestoreFn)(const void*, size_t);
+                    RestoreFn restore = (RestoreFn) dlsym(handle, "Hot_restore");
+                    if (restore)
+                        restored = restore(migrated, migrated_len);
+                }
+            }
+        }
+        if (!restored) {
+            typedef bool (*RestoreFn)(const void*, size_t);
+            RestoreFn restore = (RestoreFn) dlsym(handle, "Hot_restore");
+            if (restore)
+                restore(saved, saved_len);
+        }
+    }
+
+    // 7. Update module state: shutdown + retire the old dylib AFTER the
+    // swap so in-flight calls land on the new code first.
     if ((*mod).handle) {
+        typedef void (*ShutdownFn)(void);
+        ShutdownFn shutdown = (ShutdownFn) dlsym((*mod).handle, "Hot_shutdown_module");
+        if (shutdown)
+            shutdown();
         // Retire old dylib to grace period ring after swap
         HotRetireRing_retire(ring, (*mod).handle);
     }
@@ -484,4 +580,56 @@ HotFn Hot_get_symbol(HotModule *hot, const char *name) {
 const char *Hot_last_error(HotModule *hot) {
     if (!hot) return "NULL hot module";
     return (*hot).last_error;
+}
+
+void Hot_shutdown_module(HotModule *hot, const char *module_name) {
+    if (!hot || !module_name)
+        return;
+    HotModuleInternal *mod = find_module(hot, module_name);
+    if (!mod || !(*mod).loaded || !(*mod).handle)
+        return;
+    typedef void (*ShutdownFn)(void);
+    ShutdownFn shutdown = (ShutdownFn) dlsym((*mod).handle, "Hot_shutdown_module");
+    if (shutdown)
+        shutdown();
+}
+
+bool Hot_save_module(HotModule *hot, const char *module_name, void *buf, size_t cap, size_t *outLen) {
+    if (!hot || !module_name || !buf || !outLen)
+        return false;
+    HotModuleInternal *mod = find_module(hot, module_name);
+    if (!mod || !(*mod).loaded || !(*mod).handle)
+        return false;
+    typedef bool (*SaveFn)(void*, size_t, size_t*);
+    SaveFn save = (SaveFn) dlsym((*mod).handle, "Hot_save");
+    if (!save)
+        return false;
+    return save(buf, cap, outLen);
+}
+
+bool Hot_restore_module(HotModule *hot, const char *module_name, const void *buf, size_t len) {
+    if (!hot || !module_name || !buf)
+        return false;
+    HotModuleInternal *mod = find_module(hot, module_name);
+    if (!mod || !(*mod).loaded || !(*mod).handle)
+        return false;
+    typedef bool (*RestoreFn)(const void*, size_t);
+    RestoreFn restore = (RestoreFn) dlsym((*mod).handle, "Hot_restore");
+    if (!restore)
+        return false;
+    return restore(buf, len);
+}
+
+bool Hot_migrate_module(HotModule *hot, const char *module_name, const char *oldVersion,
+                        const void *oldBuf, size_t oldLen, void *newBuf, size_t newCap, size_t *outLen) {
+    if (!hot || !module_name || !oldVersion || !oldBuf || !newBuf || !outLen)
+        return false;
+    HotModuleInternal *mod = find_module(hot, module_name);
+    if (!mod || !(*mod).loaded || !(*mod).handle)
+        return false;
+    typedef bool (*MigrateFn)(const char*, const void*, size_t, void*, size_t, size_t*);
+    MigrateFn migrate = dlsym((*mod).handle, "Hot_migrate");
+    if (!migrate)
+        return false;
+    return migrate(oldVersion, oldBuf, oldLen, newBuf, newCap, outLen);
 }
