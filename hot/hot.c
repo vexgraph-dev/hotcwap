@@ -47,7 +47,7 @@ typedef struct HotModule {
 
 // Trampoline table entry — one per exported function
 typedef struct {
-    _Atomic(void *) ptr;             // atomic function pointer
+    _Atomic(void*) ptr;             // atomic function pointer
     char name[HOT_MANIFEST_MAX_NAME];
 } HotTrampoline;
 
@@ -122,9 +122,9 @@ static bool file_copy(const char *src, const char *dst) {
 
 // Find a module by name
 static HotModuleInternal *find_module(HotModule *hot, const char *name) {
-    for (uint32_t i = 0; i < hot->module_count; i++) {
-        if (strcmp(hot->modules[i].name, name) == 0) {
-            return &hot->modules[i];
+    for (uint32_t i = 0; i < (*hot).module_count; i++) {
+        if (strcmp((*hot).modules[i].name, name) == 0) {
+            return &(*hot).modules[i];
         }
     }
     return NULL;
@@ -133,11 +133,11 @@ static HotModuleInternal *find_module(HotModule *hot, const char *name) {
 HotModule *Hot_init(const char *hot_dir) {
     if (!hot_dir) return NULL;
     
-    HotModule *hot = (HotModule *)calloc(1, sizeof(HotModule));
+    HotModule *hot = (HotModule*) calloc(1, sizeof(HotModule));
     if (!hot) return NULL;
     
-    strncpy(hot->hot_dir, hot_dir, HOT_PATH_LEN - 1);
-    hot->hot_dir[HOT_PATH_LEN - 1] = '\0';
+    strncpy((*hot).hot_dir, hot_dir, HOT_PATH_LEN - 1);
+    (*hot).hot_dir[HOT_PATH_LEN - 1] = '\0';
     
     // Ensure hot directory exists
     DIR *dir = opendir(hot_dir);
@@ -159,12 +159,12 @@ void HotShutdown(HotModule *hot) {
     if (!hot) return;
     
     // Unload all modules
-    for (uint32_t i = 0; i < hot->module_count; i++) {
-        HotModuleInternal *mod = &hot->modules[i];
-        if (mod->handle) {
-            dlclose(mod->handle);
-            mod->handle = NULL;
-            mod->loaded = false;
+    for (uint32_t i = 0; i < (*hot).module_count; i++) {
+        HotModuleInternal *mod = &(*hot).modules[i];
+        if ((*mod).handle) {
+            dlclose((*mod).handle);
+            (*mod).handle = NULL;
+            (*mod).loaded = false;
         }
     }
     
@@ -176,7 +176,7 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
     // 1. Load the dylib
     void *handle = dlopen(dylib_path, RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
-        snprintf(hot->last_error, sizeof(hot->last_error), 
+        snprintf((*hot).last_error, sizeof((*hot).last_error), 
                  "dlopen(%s) failed: %s", dylib_path, dlerror());
         return HOT_ERROR_DLOPEN_FAILED;
     }
@@ -189,16 +189,16 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
         typedef const void *(*ManifestStructFn)(void);
         ManifestStructFn get_manifest_struct = (ManifestStructFn)dlsym(handle, "VkModuleGetManifest");
         if (!get_manifest_struct) {
-            snprintf(hot->last_error, sizeof(hot->last_error),
+            snprintf((*hot).last_error, sizeof((*hot).last_error),
                      "dlsym(Hot_manifest/VkModuleGetManifest) failed: %s", dlerror());
             dlclose(handle);
             return HOT_ERROR_DLSYM_FAILED;
         }
         // Register trampolines from the struct-based module
-        typedef const void *(*TrampolinesFn)(uint32_t *);
+        typedef const void *(*TrampolinesFn)(uint32_t*);
         TrampolinesFn get_trampolines = (TrampolinesFn)dlsym(handle, "VkModuleGetTrampolines");
         if (!get_trampolines) {
-            snprintf(hot->last_error, sizeof(hot->last_error),
+            snprintf((*hot).last_error, sizeof((*hot).last_error),
                      "dlsym(VkModuleGetTrampolines) failed: %s", dlerror());
             dlclose(handle);
             return HOT_ERROR_DLSYM_FAILED;
@@ -213,16 +213,16 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
             if (tidx >= 0) trampoline_set(tidx, entries[i].fn);
         }
         // Update module state
-        if (mod->handle) dlclose(mod->handle);
-        mod->handle = handle;
-        mod->last_modified = file_mtime(dylib_path);
-        mod->loaded = true;
+        if ((*mod).handle) dlclose((*mod).handle);
+        (*mod).handle = handle;
+        (*mod).last_modified = file_mtime(dylib_path);
+        (*mod).loaded = true;
         return HOT_OK;
     }
     
     const char *manifest_json = get_manifest();
     if (!manifest_json) {
-        snprintf(hot->last_error, sizeof(hot->last_error),
+        snprintf((*hot).last_error, sizeof((*hot).last_error),
                  "Hot_manifest returned NULL");
         dlclose(handle);
         return HOT_ERROR_DLSYM_FAILED;
@@ -231,17 +231,17 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
     // 3. Parse the manifest
     HotManifest new_manifest;
     if (!HotManifest_parse(manifest_json, strlen(manifest_json), &new_manifest)) {
-        snprintf(hot->last_error, sizeof(hot->last_error),
-                 "Failed to parse manifest for %s", mod->name);
+        snprintf((*hot).last_error, sizeof((*hot).last_error),
+                 "Failed to parse manifest for %s", (*mod).name);
         dlclose(handle);
         return HOT_ERROR_DLSYM_FAILED;
     }
     
     // 4. Verify ABI compatibility (if previously loaded)
-    if (mod->loaded) {
-        if (!HotManifest_compatible(&mod->manifest, &new_manifest)) {
-            snprintf(hot->last_error, sizeof(hot->last_error),
-                     "ABI mismatch for module %s", mod->name);
+    if ((*mod).loaded) {
+        if (!HotManifest_compatible(&(*mod).manifest, &new_manifest)) {
+            snprintf((*hot).last_error, sizeof((*hot).last_error),
+                     "ABI mismatch for module %s", (*mod).name);
             dlclose(handle);
             return HOT_ERROR_ABI_MISMATCH;
         }
@@ -252,8 +252,8 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
     InitFn init = (InitFn)dlsym(handle, "Hot_init_module");
     if (init) {
         if (!init()) {
-            snprintf(hot->last_error, sizeof(hot->last_error),
-                     "Hot_init_module failed for %s", mod->name);
+            snprintf((*hot).last_error, sizeof((*hot).last_error),
+                     "Hot_init_module failed for %s", (*mod).name);
             dlclose(handle);
             return HOT_ERROR_INIT_FAILED;
         }
@@ -268,7 +268,7 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
         if (tidx < 0) {
             tidx = trampoline_register(export_name);
             if (tidx < 0) {
-                snprintf(hot->last_error, sizeof(hot->last_error),
+                snprintf((*hot).last_error, sizeof((*hot).last_error),
                          "Too many trampolines");
                 dlclose(handle);
                 return HOT_ERROR_OUT_OF_MEMORY;
@@ -278,7 +278,7 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
         // Get the function pointer from the dylib
         void *fn = dlsym(handle, export_name);
         if (!fn) {
-            snprintf(hot->last_error, sizeof(hot->last_error),
+            snprintf((*hot).last_error, sizeof((*hot).last_error),
                      "dlsym(%s) failed: %s", export_name, dlerror());
             dlclose(handle);
             return HOT_ERROR_DLSYM_FAILED;
@@ -289,15 +289,15 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
     }
     
     // 7. Update module state
-    if (mod->handle) {
+    if ((*mod).handle) {
         // Close old dylib after swap
-        dlclose(mod->handle);
+        dlclose((*mod).handle);
     }
     
-    mod->handle = handle;
-    mod->manifest = new_manifest;
-    mod->last_modified = file_mtime(dylib_path);
-    mod->loaded = true;
+    (*mod).handle = handle;
+    (*mod).manifest = new_manifest;
+    (*mod).last_modified = file_mtime(dylib_path);
+    (*mod).loaded = true;
     
     return HOT_OK;
 }
@@ -307,10 +307,10 @@ HotResult Hot_poll(HotModule *hot, uint32_t *loaded_count) {
     if (loaded_count) *loaded_count = 0;
     
     // Scan the hot directory for .dylib files
-    DIR *dir = opendir(hot->hot_dir);
+    DIR *dir = opendir((*hot).hot_dir);
     if (!dir) {
-        snprintf(hot->last_error, sizeof(hot->last_error),
-                 "Cannot open hot directory: %s", hot->hot_dir);
+        snprintf((*hot).last_error, sizeof((*hot).last_error),
+                 "Cannot open hot directory: %s", (*hot).hot_dir);
         return HOT_ERROR_FILE_NOT_FOUND;
     }
     
@@ -319,7 +319,7 @@ HotResult Hot_poll(HotModule *hot, uint32_t *loaded_count) {
     
     while ((ent = readdir(dir)) != NULL) {
         // Check if it's a .dylib or .so
-        const char *name = ent->d_name;
+        const char *name = (*ent).d_name;
         size_t nlen = strlen(name);
         bool is_dylib = (nlen > 6 && strcmp(name + nlen - 6, ".dylib") == 0) ||
                         (nlen > 3 && strcmp(name + nlen - 3, ".so") == 0);
@@ -334,7 +334,7 @@ HotResult Hot_poll(HotModule *hot, uint32_t *loaded_count) {
         
         // Build full path
         char path[HOT_PATH_LEN];
-        snprintf(path, sizeof(path), "%s/%s", hot->hot_dir, name);
+        snprintf(path, sizeof(path), "%s/%s", (*hot).hot_dir, name);
         
         // Check if this is a new or updated module
         time_t mtime = file_mtime(path);
@@ -342,32 +342,32 @@ HotResult Hot_poll(HotModule *hot, uint32_t *loaded_count) {
         
         if (!mod) {
             // New module — add it
-            if (hot->module_count >= HOT_MAX_MODULES) {
-                snprintf(hot->last_error, sizeof(hot->last_error),
+            if ((*hot).module_count >= HOT_MAX_MODULES) {
+                snprintf((*hot).last_error, sizeof((*hot).last_error),
                          "Too many modules");
                 continue;
             }
-            mod = &hot->modules[hot->module_count++];
-            strncpy(mod->name, mod_name, HOT_MANIFEST_MAX_NAME - 1);
-            mod->name[HOT_MANIFEST_MAX_NAME - 1] = '\0';
-            strncpy(mod->path, path, HOT_PATH_LEN - 1);
-            mod->path[HOT_PATH_LEN - 1] = '\0';
-            mod->handle = NULL;
-            mod->loaded = false;
-            memset(&mod->manifest, 0, sizeof(mod->manifest));
+            mod = &(*hot).modules[(*hot).module_count++];
+            strncpy((*mod).name, mod_name, HOT_MANIFEST_MAX_NAME - 1);
+            (*mod).name[HOT_MANIFEST_MAX_NAME - 1] = '\0';
+            strncpy((*mod).path, path, HOT_PATH_LEN - 1);
+            (*mod).path[HOT_PATH_LEN - 1] = '\0';
+            (*mod).handle = NULL;
+            (*mod).loaded = false;
+            memset(&(*mod).manifest, 0, sizeof((*mod).manifest));
         }
         
         // Check if file has been modified
-        if (mod->loaded && mod->last_modified >= mtime) {
+        if ((*mod).loaded && (*mod).last_modified >= mtime) {
             continue; // No change
         }
         
         // Clone the dylib first (so we can verify before committing)
         char clone_path[HOT_PATH_LEN];
-        snprintf(clone_path, sizeof(clone_path), "%s/.%s.clone", hot->hot_dir, name);
+        snprintf(clone_path, sizeof(clone_path), "%s/.%s.clone", (*hot).hot_dir, name);
         
         if (!file_copy(path, clone_path)) {
-            snprintf(hot->last_error, sizeof(hot->last_error),
+            snprintf((*hot).last_error, sizeof((*hot).last_error),
                      "Failed to clone %s", path);
             continue;
         }
@@ -381,21 +381,21 @@ HotResult Hot_poll(HotModule *hot, uint32_t *loaded_count) {
         
         if (result == HOT_OK) {
             // Success — commit the swap
-            if (mod->handle) {
-                dlclose(mod->handle);
+            if ((*mod).handle) {
+                dlclose((*mod).handle);
             }
             memcpy(mod, &clone_mod, sizeof(HotModuleInternal));
             reloaded++;
             
             fprintf(stderr, "[hot] reloaded %s v%s\n", 
-                    mod->name, mod->manifest.version);
+                    (*mod).name, (*mod).manifest.version);
         } else {
             // Failed — clean up
             if (clone_mod.handle) {
                 dlclose(clone_mod.handle);
             }
             fprintf(stderr, "[hot] failed to reload %s: %s\n",
-                    mod->name, hot->last_error);
+                    (*mod).name, (*hot).last_error);
         }
         
         // Remove clone
@@ -412,13 +412,13 @@ const void *Hot_get_api(HotModule *hot, const char *module_name) {
     if (!hot || !module_name) return NULL;
     
     HotModuleInternal *mod = find_module(hot, module_name);
-    if (!mod || !mod->loaded) return NULL;
+    if (!mod || !(*mod).loaded) return NULL;
     
     // Return the module's function pointer table
     // For now, return the first export's trampoline
-    if (mod->manifest.export_count == 0) return NULL;
+    if ((*mod).manifest.export_count == 0) return NULL;
     
-    int tidx = trampoline_find(mod->manifest.exports[0].name);
+    int tidx = trampoline_find((*mod).manifest.exports[0].name);
     if (tidx < 0) return NULL;
     
     return trampoline_get(tidx);
@@ -436,5 +436,5 @@ HotFn Hot_get_symbol(HotModule *hot, const char *name) {
 
 const char *Hot_last_error(HotModule *hot) {
     if (!hot) return "NULL hot module";
-    return hot->last_error;
+    return (*hot).last_error;
 }
