@@ -27,6 +27,8 @@ if(NOT TARGET hotcwap)
 add_library(hotcwap STATIC
     app/application.c
     hot/hot.c
+    hot/hot_trampoline.c
+    hot/hot_retire.c
     hot/manifest.c
     hot/vk_loader.c
     vulkan/vulkan.c

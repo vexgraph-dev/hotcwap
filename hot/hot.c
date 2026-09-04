@@ -1,13 +1,13 @@
 #include "hot/hot.h"
 #include "hot/manifest.h"
-#include "hot/vk_context.h"
+#include "hot/hot_trampoline.h"
+#include "hot/hot_retire.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <dirent.h>
 #include <unistd.h>
 #include <stdatomic.h>
@@ -16,9 +16,35 @@
 ;;OVERVIEW
 /**
  * ============================================================================
- * MODULE: Hot (hot/hot.c)
+ * CLASS: HotModule (hot/hot.c)
+ * LEVEL: L4 — Self-Management (watches, verifies, swaps, retires; fixes/upgrades itself)
  * ============================================================================
- * Hotloading system for anti.
+ * Hotloading system: watches hot_dir for .dylib/.so, verifies ABI via
+ * HotManifest, atomically swaps trampoline pointers, retires old handles
+ * after a grace period. Hot_poll() runs on main thread only.
+ *
+ * STRUCT FIELDS (Mirroring typedef struct HotModule — exactly this file's class):
+ * ----------------------------------------------------------------------------
+ *   char hot_dir[HOT_PATH_LEN];              // watched directory (512B path)
+ *   HotModuleInternal modules[HOT_MAX_MODULES]; // per-module slots (max 32)
+ *   uint32_t module_count;                   // used slots in modules[]
+ *   char last_error[256];                    // last diagnostic string
+ *   HotTrampolineTable trampolines;          // per-instance symbols (zeroed by Hot_init calloc)
+ *   HotRetireRing retireRing;                // per-instance generational close
+ *
+ * PRIVATE HELPERS (kept file-local pure-data only, with full fields):
+ * ----------------------------------------------------------------------------
+ *   HotModuleInternal (per-module state — HotModule's slot type, no own API):
+ *     char name[HOT_MANIFEST_MAX_NAME];      // module name (no extension)
+ *     char path[HOT_PATH_LEN];               // source dylib path
+ *     void *handle;                          // dlopen handle (NULL = unloaded)
+ *     uint64_t last_modified;                // mtime ns + size (change stamp)
+ *     HotManifest manifest;                  // last verified manifest
+ *     bool loaded;                           // true once first load succeeds
+ *
+ * Segregated (own files, see their overviews):
+ *   HotTrampoline → hot/hot_trampoline.h/c
+ *   HotRetiredHandle → hot/hot_retire.h/c
  *
  * FUNCTION REGISTRY:
  * ----------------------------------------------------------------------------
@@ -28,11 +54,11 @@
  * Core Functions:
  *   - HotShutdown(hot)
  *   - Hot_poll(hot, loaded_count)
- *   - Hot_last_error(hot)
  *
  * Getters:
  *   - Hot_get_api(hot, module_name)
  *   - Hot_get_symbol(hot, name)
+ *   - Hot_last_error(hot)
  * ============================================================================
  */
 
@@ -59,7 +85,7 @@ typedef struct {
     char name[HOT_MANIFEST_MAX_NAME];
     char path[HOT_PATH_LEN];
     void *handle;                    // dlopen handle
-    uint64_t last_modified;        // last file modification timestamp (ns) + size
+    uint64_t last_modified;          // last file modification timestamp (ns) + size
     HotManifest manifest;            // current manifest
     bool loaded;                     // is currently loaded
 } HotModuleInternal;
@@ -68,128 +94,12 @@ typedef struct HotModule {
     HotModuleInternal modules[HOT_MAX_MODULES];
     uint32_t module_count;
     char last_error[256];
+    HotTrampolineTable trampolines;  // per-instance symbols (no cross-app collision)
+    HotRetireRing retireRing;        // per-instance generational close
 } HotModule;
 
-// Trampoline table entry — one per exported function
-typedef struct {
-    _Atomic(void*) ptr;             // atomic function pointer
-    _Atomic(void*) fallback_ptr;    // prior generation pointer for mid-swap resilience
-    char name[HOT_MANIFEST_MAX_NAME];
-} HotTrampoline;
-
-#define HOT_MAX_TRAMPOLINES 1024
-static HotTrampoline s_trampolines[HOT_MAX_TRAMPOLINES];
-static _Atomic uint32_t s_trampoline_count = 0;
-
-// Register a trampoline for a function. Returns the trampoline index.
-static int trampoline_register(const char *name) {
-    uint32_t idx = atomic_fetch_add(&s_trampoline_count, 1);
-    if (idx >= HOT_MAX_TRAMPOLINES) return -1;
-    strncpy(s_trampolines[idx].name, name, HOT_MANIFEST_MAX_NAME - 1);
-    s_trampolines[idx].name[HOT_MANIFEST_MAX_NAME - 1] = '\0';
-    atomic_store(&s_trampolines[idx].ptr, NULL);
-    atomic_store(&s_trampolines[idx].fallback_ptr, NULL);
-    return (int)idx;
-}
-
-// Get a trampoline's current function pointer, falling back to prior generation on mid-swap NULL.
-static void *trampoline_get(int idx) {
-    if (idx < 0 || idx >= (int)atomic_load(&s_trampoline_count)) return NULL;
-    void *ptr = atomic_load(&s_trampolines[idx].ptr);
-    if (!ptr) {
-        // Poll briefly in case atomic swap is in-flight
-        for (int retry = 0; retry < 4 && !ptr; retry++) {
-            #if defined(__aarch64__)
-            __asm__ volatile("yield");
-            #endif
-            ptr = atomic_load(&s_trampolines[idx].ptr);
-        }
-        // Fall back to prior generation rather than returning NULL and crashing caller
-        if (!ptr) {
-            ptr = atomic_load(&s_trampolines[idx].fallback_ptr);
-        }
-    }
-    return ptr;
-}
-
-// Set a trampoline's function pointer atomically.
-static void trampoline_set(int idx, void *ptr) {
-    if (idx < 0 || idx >= (int)atomic_load(&s_trampoline_count)) return;
-    void *old = atomic_load(&s_trampolines[idx].ptr);
-    if (old && old != ptr) {
-        atomic_store(&s_trampolines[idx].fallback_ptr, old);
-    }
-    atomic_store(&s_trampolines[idx].ptr, ptr);
-}
-
-// Find a trampoline by name. Returns -1 if not found.
-static int trampoline_find(const char *name) {
-    uint32_t count = atomic_load(&s_trampoline_count);
-    for (uint32_t i = 0; i < count; i++) {
-        if (strcmp(s_trampolines[i].name, name) == 0) {
-            return (int)i;
-        }
-    }
-    return -1;
-}
-
-// Generational handle retirement: keeps old dylib handles alive for N generations
-// before closing them with dlclose() to prevent race conditions during module reload.
-#define HOT_RETIRED_MAX 16
-#define HOT_RETIRED_GENERATIONS 4
-
-typedef struct {
-    void *handle;
-    uint32_t generation;
-} HotRetiredHandle;
-
-static HotRetiredHandle s_retired[HOT_RETIRED_MAX] = {0};
-static uint32_t s_current_generation = 0;
-
-static void hot_retire_handle(void *handle) {
-    if (!handle) return;
-
-    for (size_t i = 0; i < HOT_RETIRED_MAX; i++) {
-        if (s_retired[i].handle && (s_current_generation - s_retired[i].generation >= HOT_RETIRED_GENERATIONS)) {
-            dlclose(s_retired[i].handle);
-            s_retired[i].handle = NULL;
-        }
-    }
-
-    size_t slot = HOT_RETIRED_MAX;
-    for (size_t i = 0; i < HOT_RETIRED_MAX; i++) {
-        if (!s_retired[i].handle) {
-            slot = i;
-            break;
-        }
-    }
-
-    if (slot == HOT_RETIRED_MAX) {
-        size_t oldest_idx = 0;
-        uint32_t oldest_gen = UINT32_MAX;
-        for (size_t i = 0; i < HOT_RETIRED_MAX; i++) {
-            if (s_retired[i].generation < oldest_gen) {
-                oldest_gen = s_retired[i].generation;
-                oldest_idx = i;
-            }
-        }
-        dlclose(s_retired[oldest_idx].handle);
-        slot = oldest_idx;
-    }
-
-    s_retired[slot].handle = handle;
-    s_retired[slot].generation = s_current_generation;
-}
-
-static void hot_advance_generation(void) {
-    s_current_generation++;
-    for (size_t i = 0; i < HOT_RETIRED_MAX; i++) {
-        if (s_retired[i].handle && (s_current_generation - s_retired[i].generation >= HOT_RETIRED_GENERATIONS)) {
-            dlclose(s_retired[i].handle);
-            s_retired[i].handle = NULL;
-        }
-    }
-}
+// CONSTRUCTORS — HotModule owns the module slots below; row mechanics live
+// in hot_trampoline.c, generational close in hot_retire.c.
 
 // Get file modification time with nanosecond precision + file size
 static uint64_t file_mtime(const char *path) {
@@ -270,7 +180,7 @@ HotModule *Hot_init(const char *hot_dir) {
 
 void HotShutdown(HotModule *hot) {
     if (!hot) return;
-    
+
     // Unload all modules
     for (uint32_t i = 0; i < (*hot).module_count; i++) {
         HotModuleInternal *mod = &(*hot).modules[i];
@@ -282,18 +192,15 @@ void HotShutdown(HotModule *hot) {
     }
     
     // Drain retired handle ring
-    for (size_t i = 0; i < HOT_RETIRED_MAX; i++) {
-        if (s_retired[i].handle) {
-            dlclose(s_retired[i].handle);
-            s_retired[i].handle = NULL;
-        }
-    }
+    HotRetireRing_drainAll(&(*hot).retireRing);
 
     free(hot);
 }
 
 // Load a module from a dylib path
 static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char *dylib_path) {
+    HotTrampolineTable *table = &(*hot).trampolines;
+    HotRetireRing *ring = &(*hot).retireRing;
     // 1. Load the dylib
     void *handle = dlopen(dylib_path, RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
@@ -329,12 +236,12 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
         for (uint32_t i = 0; i < trampoline_count; i++) {
             // Trampolines are {const char *name, void *function}
             const struct { const char *name; void *fn; } *entries = trampolines;
-            int tidx = trampoline_find(entries[i].name);
-            if (tidx < 0) tidx = trampoline_register(entries[i].name);
-            if (tidx >= 0) trampoline_set(tidx, entries[i].fn);
+            int tidx = HotTrampolineTable_find(table, entries[i].name);
+            if (tidx < 0) tidx = HotTrampolineTable_register(table, entries[i].name);
+            if (tidx >= 0) HotTrampolineTable_set(table, tidx, entries[i].fn);
         }
         // Update module state
-        if ((*mod).handle) hot_retire_handle((*mod).handle);
+        if ((*mod).handle) HotRetireRing_retire(ring, (*mod).handle);
         (*mod).handle = handle;
         (*mod).last_modified = file_mtime(dylib_path);
         (*mod).loaded = true;
@@ -367,7 +274,7 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
             return HOT_ERROR_ABI_MISMATCH;
         }
     }
-    
+
     // 5. Call the module's init function
     typedef bool (*InitFn)(void);
     InitFn init = (InitFn)dlsym(handle, "Hot_init_module");
@@ -383,11 +290,11 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
     // 6. Register trampolines for all exports
     for (uint32_t i = 0; i < new_manifest.export_count; i++) {
         const char *export_name = new_manifest.exports[i].name;
-        
+
         // Find or create trampoline
-        int tidx = trampoline_find(export_name);
+        int tidx = HotTrampolineTable_find(table, export_name);
         if (tidx < 0) {
-            tidx = trampoline_register(export_name);
+            tidx = HotTrampolineTable_register(table, export_name);
             if (tidx < 0) {
                 snprintf((*hot).last_error, sizeof((*hot).last_error),
                          "Too many trampolines");
@@ -395,7 +302,7 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
                 return HOT_ERROR_OUT_OF_MEMORY;
             }
         }
-        
+
         // Get the function pointer from the dylib
         void *fn = dlsym(handle, export_name);
         if (!fn) {
@@ -404,15 +311,15 @@ static HotResult load_module(HotModule *hot, HotModuleInternal *mod, const char 
             dlclose(handle);
             return HOT_ERROR_DLSYM_FAILED;
         }
-        
+
         // Atomic swap of the trampoline
-        trampoline_set(tidx, fn);
+        HotTrampolineTable_set(table, tidx, fn);
     }
-    
+
     // 7. Update module state
     if ((*mod).handle) {
         // Retire old dylib to grace period ring after swap
-        hot_retire_handle((*mod).handle);
+        HotRetireRing_retire(ring, (*mod).handle);
     }
     
     (*mod).handle = handle;
@@ -427,7 +334,8 @@ HotResult Hot_poll(HotModule *hot, uint32_t *loaded_count) {
     if (!hot) return HOT_ERROR_FILE_NOT_FOUND;
     if (loaded_count) *loaded_count = 0;
 
-    hot_advance_generation();
+    HotRetireRing *ring = &(*hot).retireRing;
+    HotRetireRing_advance(ring);
     
     // Scan the hot directory for .dylib files
     DIR *dir = opendir((*hot).hot_dir);
@@ -517,7 +425,7 @@ HotResult Hot_poll(HotModule *hot, uint32_t *loaded_count) {
         if (result == HOT_OK) {
             // Success — commit the swap
             if ((*mod).handle) {
-                hot_retire_handle((*mod).handle);
+                HotRetireRing_retire(ring, (*mod).handle);
             }
             memcpy(mod, &clone_mod, sizeof(HotModuleInternal));
             reloaded++;
@@ -552,21 +460,25 @@ const void *Hot_get_api(HotModule *hot, const char *module_name) {
     // Return the module's function pointer table
     // For now, return the first export's trampoline
     if ((*mod).manifest.export_count == 0) return NULL;
-    
-    int tidx = trampoline_find((*mod).manifest.exports[0].name);
+
+    HotTrampolineTable *table = &(*hot).trampolines;
+    HotManifest *manifest = &(*mod).manifest;
+    HotExport *first = &(*manifest).exports[0];
+    int tidx = HotTrampolineTable_find(table, (*first).name);
     if (tidx < 0) return NULL;
-    
-    return trampoline_get(tidx);
+
+    return HotTrampolineTable_get(table, tidx);
 }
 
 HotFn Hot_get_symbol(HotModule *hot, const char *name) {
     if (!hot || !name) return NULL;
-    
+
     // Find the trampoline by name
-    int tidx = trampoline_find(name);
+    HotTrampolineTable *table = &(*hot).trampolines;
+    int tidx = HotTrampolineTable_find(table, name);
     if (tidx < 0) return NULL;
-    
-    return trampoline_get(tidx);
+
+    return HotTrampolineTable_get(table, tidx);
 }
 
 const char *Hot_last_error(HotModule *hot) {
