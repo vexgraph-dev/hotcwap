@@ -11,6 +11,31 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <stdatomic.h>
+#include "annotation/overview.h"
+
+;;OVERVIEW
+/**
+ * ============================================================================
+ * MODULE: Hot (hot/hot.c)
+ * ============================================================================
+ * Hotloading system for anti.
+ *
+ * FUNCTION REGISTRY:
+ * ----------------------------------------------------------------------------
+ * Constructors:
+ *   - Hot_init(hot_dir)
+ *
+ * Core Functions:
+ *   - HotShutdown(hot)
+ *   - Hot_poll(hot, loaded_count)
+ *   - Hot_last_error(hot)
+ *
+ * Getters:
+ *   - Hot_get_api(hot, module_name)
+ *   - Hot_get_symbol(hot, name)
+ * ============================================================================
+ */
+
 
 // hot/hot.c — Hotloading system implementation.
 //

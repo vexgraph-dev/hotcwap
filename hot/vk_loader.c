@@ -5,6 +5,42 @@
 #include <string.h>
 #include <dlfcn.h>
 #include <vulkan/vulkan.h>
+#include "annotation/overview.h"
+
+;;OVERVIEW
+/**
+ * ============================================================================
+ * MODULE: Vk_loader (hot/vk_loader.c)
+ * ============================================================================
+ * VkDevice owner and Vulkan module loader.
+ *
+ * FUNCTION REGISTRY:
+ * ----------------------------------------------------------------------------
+ * Constructors:
+ *   - trampoline_create(name)
+ *
+ * Core Functions:
+ *   - trampoline_find(name)
+ *   - for(i++)
+ *   - strncpy(s_trampolines[idx].name, name, 63)
+ *   - atomic_store(&s_trampolines[idx].ptr, NULL)
+ *   - volatile("yield")
+ *   - vk_retire_handle(handle)
+ *   - dlclose(s_vk_retired[i].handle)
+ *   - vk_advance_generation(void)
+ *   - hot_vk_init_loader(instance, phys, device, queue, queue_family)
+ *   - vkCreatePipelineCache(s_device, &cache_ci, NULL, &s_cache)
+ *   - hot_vk_load_module(path)
+ *   - fprintf(stderr, exports\n")
+ *   - hot_vk_shutdown(void)
+ *   - vkDestroyPipelineCache(s_device, s_cache, NULL)
+ *   - printf(shutdown\n")
+ *
+ * Getters:
+ *   - hot_vk_get_symbol(name)
+ * ============================================================================
+ */
+
 
 // hot/vk_loader.c — VkDevice owner and Vulkan module loader.
 //

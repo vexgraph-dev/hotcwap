@@ -7,6 +7,39 @@
 #include <dlfcn.h>
 #include <stdatomic.h>
 #include "time/nanotime.h"
+#include "annotation/overview.h"
+
+;;OVERVIEW
+/**
+ * ============================================================================
+ * MODULE: Vulkan_mac (vulkan/vulkan_mac.c)
+ * ============================================================================
+ * macOS-specific Vulkan backend functions.
+ *
+ * FUNCTION REGISTRY:
+ * ----------------------------------------------------------------------------
+ * Core Functions:
+ *   - VkMac_loadLib(void)
+ *   - VkMac_createSurface(window, instance, gpa, outSurface)
+ *   - VkMac_ensureIOSurfacePass(void)
+ *   - VkMac_resizeRenderTrampoline(userdata)
+ *
+ * Getters:
+ *   - Vk_getDevice(void)
+ *   - Vk_getQueue(void)
+ *   - Vk_getCmdBuffer(void)
+ *   - Vk_getTriPipeline(void)
+ *   - Vk_getTriLayout(void)
+ *   - Vk_getAnimStartNanos(void)
+ *   - Vk_getGdpa(void)
+ *   - Vk_getInstance(void)
+ *   - Vk_getGpa(void)
+ *   - Vk_getPhys(void)
+ *   - Vk_getQueueFamily(void)
+ *   - VkMac_getIOSurfacePass(void)
+ * ============================================================================
+ */
+
 
 // Load a Vulkan device function pointer (void return, no error check).
 #define MAC_LOAD_DEVICE_VOID(name) \

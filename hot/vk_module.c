@@ -3,6 +3,37 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdatomic.h>
+#include "annotation/overview.h"
+
+;;OVERVIEW
+/**
+ * ============================================================================
+ * MODULE: Vk_module (hot/vk_module.c)
+ * ============================================================================
+ * Vulkan module implementation.
+ *
+ * FUNCTION REGISTRY:
+ * ----------------------------------------------------------------------------
+ * Core Functions:
+ *   - register_trampoline(name, fn)
+ *   - for(i++)
+ *   - vk_begin_frame(void)
+ *   - vk_end_frame(void)
+ *   - vk_draw_rect(x, y, w, h, r, g, b, a)
+ *   - vk_draw_texture(tex_id, x, y, w, h, mode)
+ *   - VkModuleInit(context)
+ *   - VkModuleShutdown(void)
+ *   - printf(shutdown\n")
+ *   - VkModuleGetTrampolines(count)
+ *   - VkModuleGetManifest(void)
+ *   - VkModuleSaveCache(void)
+ *   - VkModuleLoadCache(void)
+ *
+ * Getters:
+ *   - get_trampoline(name)
+ * ============================================================================
+ */
+
 
 // hot/vk_module.c — Vulkan module implementation.
 //

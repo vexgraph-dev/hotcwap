@@ -3,6 +3,26 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include "annotation/overview.h"
+
+;;OVERVIEW
+/**
+ * ============================================================================
+ * MODULE: Manifest (hot/manifest.c)
+ * ============================================================================
+ * Module manifest format.
+ *
+ * FUNCTION REGISTRY:
+ * ----------------------------------------------------------------------------
+ * Core Functions:
+ *   - HotManifest_parse(json, len, out)
+ *   - HotManifest_compatible(old_manifest, new_manifest)
+ *
+ * Getters:
+ *   - HotManifest_get_type_id(manifest, name)
+ * ============================================================================
+ */
+
 
 // hot/manifest.c — Minimal JSON parser for module manifests.
 //

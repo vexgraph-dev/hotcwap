@@ -15,6 +15,66 @@
 #include "annotation/incomplete.h"
 #include "annotation/intention.h"
 #include "annotation/platform_exclusive.h"
+#include "annotation/overview.h"
+
+;;OVERVIEW
+/**
+ * ============================================================================
+ * MODULE: Window_linux (window/window_linux.c)
+ * ============================================================================
+ * Linux/X11 backend for the Window API.
+ *
+ * FUNCTION REGISTRY:
+ * ----------------------------------------------------------------------------
+ * Constructors:
+ *   - Window_create(title, width, height)
+ *
+ * Core Functions:
+ *   - Window_destroy(window)
+ *   - Window_shouldClose(window)
+ *   - Window_pollEvents(void)
+ *   - Window_renderGeneration(window)
+ *   - Window_center(window)
+ *   - Window_minimize(window)
+ *   - Window_restore(window)
+ *   - Window_toggleFullscreen(window)
+ *
+ * Setters:
+ *   - Window_setPresentMode(window, mode)
+ *   - Window_setTransparent(window, transparent)
+ *   - Window_setContainer(window, root)
+ *   - Window_setEnabled(window, enabled)
+ *   - Window_setTitle(window, title)
+ *   - Window_setSize(window, width, height)
+ *   - Window_setLocation(window, x, y)
+ *   - Window_setResizeRenderHook(window, fn, userdata)
+ *   - Window_setVisible(window, visible)
+ *   - Window_setResizable(window, resizable)
+ *   - Window_setClosable(window, closable)
+ *   - Window_setMiniaturizable(window, miniaturizable)
+ *   - Window_setFullscreenButton(window, enabled)
+ *   - Window_setUndecorated(window, mode)
+ *   - Window_setFullscreen(window, fullscreen)
+ *   - Window_setDRM(window, enabled)
+ *   - Window_setMinSize(window, width, height)
+ *   - Window_setMaxSize(window, width, height)
+ *
+ * Getters:
+ *   - Window_getPresentMode(window)
+ *   - Window_isTransparent(window)
+ *   - Window_getContainer(window)
+ *   - Window_isEnabled(window)
+ *   - Window_getContentOrigin(window, outX, outY)
+ *   - Window_getMonitorId(window)
+ *   - Window_getLocation(window, outX, outY)
+ *   - Window_isResizable(window)
+ *   - Window_isClosable(window)
+ *   - Window_isMiniaturizable(window)
+ *   - Window_isMinimized(window)
+ *   - Window_isFullscreen(window)
+ * ============================================================================
+ */
+
 
 #if defined(__linux__) || defined(__unix__)
 

@@ -15,6 +15,110 @@
 #include "annotation/incomplete.h"
 #include "annotation/intention.h"
 #include "annotation/platform_exclusive.h"
+#include "annotation/overview.h"
+
+;;OVERVIEW
+/**
+ * ============================================================================
+ * MODULE: Window (window/window.c)
+ * ============================================================================
+ * platform-agnostic window API.
+ *
+ * FUNCTION REGISTRY:
+ * ----------------------------------------------------------------------------
+ * Constructors:
+ *   - Window_0(void)
+ *   - Window_1(title)
+ *   - Window_3(title, width, height)
+ *   - Window_new(desc)
+ *   - Window_create(title, width, height)
+ *
+ * Core Functions:
+ *   - Window_destroy(window)
+ *   - Window_shouldClose(window)
+ *   - Window_pollEvents(void)
+ *   - Window_width(window)
+ *   - Window_height(window)
+ *   - Window_center(window)
+ *   - Window_show(window)
+ *   - Window_hide(window)
+ *   - Window_forceNativeContainerOnRoot(window, flag)
+ *   - Window_attachPanelIOSurface(window, panel, width, height)
+ *   - Window_resizePanelIOSurface(window, panel, width, height)
+ *   - Window_compositeIOSurfaceChildren(window, contentPanel)
+ *   - Window_renderGeneration(window)
+ *   - Window_bringToFront(window)
+ *   - Window_minimize(window)
+ *   - Window_restore(window)
+ *   - Window_toggleFullscreen(window)
+ *   - Window_contentView(window)
+ *   - Window_metalLayer(window)
+ *   - Window_present(window, frame)
+ *   - Window_addKeyAdapter(window, adapter)
+ *   - Window_removeKeyAdapter(window, adapter)
+ *   - Window_addMouseAdapter(window, adapter)
+ *   - Window_removeMouseAdapter(window, adapter)
+ *   - Window_addTouchAdapter(window, adapter)
+ *   - Window_removeTouchAdapter(window, adapter)
+ *   - Window_addWindowAdapter(window, adapter)
+ *   - Window_removeWindowAdapter(window, adapter)
+ *   - Window_dispatchEvents(window)
+ *   - Window_id(window)
+ *   - Window_focus(window)
+ *   - Window_sizeGeneration(window)
+ *
+ * Setters:
+ *   - Window_setTitle(window, title)
+ *   - Window_setSize(window, width, height)
+ *   - Window_setLocation(window, x, y)
+ *   - Window_setVisible(window, visible)
+ *   - Window_setContainer(window, root)
+ *   - Window_setContentPanel(window, panel)
+ *   - Window_setScenePanel(window, panel)
+ *   - Window_setPresentMode(window, mode)
+ *   - Window_setTransparent(window, transparent)
+ *   - Window_setEnabled(window, enabled)
+ *   - Window_setResizable(window, resizable)
+ *   - Window_setClosable(window, closable)
+ *   - Window_setMiniaturizable(window, miniaturizable)
+ *   - Window_setFullscreenButton(window, enabled)
+ *   - Window_setUndecorated(window, type)
+ *   - Window_setFloatingTrafficLights(window, floating)
+ *   - Window_setOpacity(window, opacity)
+ *   - Window_setTransparentBackground(window, transparent)
+ *   - Window_setBlur(window, blur)
+ *   - Window_setAlwaysOnTop(window, onTop)
+ *   - Window_setClickThrough(window, clickThrough)
+ *   - Window_setShadow(window, shadow)
+ *   - Window_setMovableByBackground(window, movable)
+ *   - Window_setFullscreen(window, fullscreen)
+ *   - Window_setDRM(window, enabled)
+ *   - Window_setMinSize(window, width, height)
+ *   - Window_setMaxSize(window, width, height)
+ *   - Window_setCursorLocked(window, locked)
+ *   - Window_setGravityTopLeft(window)
+ *   - Window_setResizeRenderHook(window, fn, userdata)
+ *
+ * Getters:
+ *   - Window_getLocation(window, outX, outY)
+ *   - Window_getContentOrigin(window, outX, outY)
+ *   - Window_getContainer(window)
+ *   - Window_getContentPanel(window)
+ *   - Window_getScenePanel(window)
+ *   - Window_isNativeContainerOnRoot(window)
+ *   - Window_getPresentMode(window)
+ *   - Window_isTransparent(window)
+ *   - Window_isEnabled(window)
+ *   - Window_isResizable(window)
+ *   - Window_isClosable(window)
+ *   - Window_isMiniaturizable(window)
+ *   - Window_isMinimized(window)
+ *   - Window_isFullscreen(window)
+ *   - Window_isFocused(window)
+ *   - Window_getMonitorId(window)
+ * ============================================================================
+ */
+
 
 #if defined(_WIN32)
 
