@@ -31,6 +31,8 @@ add_library(hotcwap STATIC
     hot/hot_retire.c
     hot/manifest.c
     hot/vk_loader.c
+    hot/spv_watch.c
+    hot/stage.c
     vulkan/vulkan.c
 )
 target_include_directories(hotcwap PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
