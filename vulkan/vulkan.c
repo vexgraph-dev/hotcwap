@@ -82,7 +82,7 @@
  *   - Vk_clearPresent(void)
  *   - SpinLock_unlock(&s_presentLock)
  *   - presentFrameTail(imageIndex)
- *   - WaitForFences_fn(s_device, 1, &s_fence, VK_TRUE, UINT64_MAX)
+ *   - WaitForFences_fn(s_device, 1, &s_fence, VK_TRUE, 100000000ULL)
  *   - ResetCommandBuffer_fn(s_cmdBuffer, 0)
  *   - BeginCommandBuffer_fn(s_cmdBuffer, &bbi)
  *   - CmdPipelineBarrier_fn(s_cmdBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toPrep)
@@ -1308,10 +1308,15 @@ static bool presentFrameLocked(void) {
     if (!Vk_ready() || !s_pipelinesBuilt) return false;
 
     // Retire the PREVIOUS frame through its fence BEFORE touching the chain.
+    // Bounded wait: if the surface died (e.g. fullscreen close yanked the
+    // drawable), the fence may never signal. Hanging here forever parks the
+    // present worker inside Vk_clearPresent so pthread_join never returns and
+    // teardown freezes with a ghost window. Drop the frame instead.
     VK_LOAD_DEVICE(WaitForFences)
     VK_LOAD_DEVICE(ResetCommandBuffer)
     VK_LOAD_DEVICE(AcquireNextImageKHR)
-    WaitForFences_fn(s_device, 1, &s_fence, VK_TRUE, UINT64_MAX);
+    if (WaitForFences_fn(s_device, 1, &s_fence, VK_TRUE, 100000000ULL) != VK_SUCCESS)
+        return false;
     ResetCommandBuffer_fn(s_cmdBuffer, 0);
 
     if (!s_dumpEnvRead) {
