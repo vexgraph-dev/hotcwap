@@ -10,6 +10,16 @@ if(APPLE)
     set(CMAKE_OBJC_STANDARD_REQUIRED ON)
 endif()
 
+# Release: dead-code stripping so unused symbols cost zero bytes in artifacts.
+# (Duplicated per repo for standalone builds; harmless when built in-tree.)
+if(APPLE)
+    add_compile_options($<$<CONFIG:Release>:-ffunction-sections> $<$<CONFIG:Release>:-fdata-sections>)
+    add_link_options($<$<CONFIG:Release>:-Wl,-dead_strip>)
+elseif(UNIX)
+    add_compile_options($<$<CONFIG:Release>:-ffunction-sections> $<$<CONFIG:Release>:-fdata-sections>)
+    add_link_options($<$<CONFIG:Release>:-Wl,--gc-sections>)
+endif()
+
 if(NOT TARGET hotcwap)
 # The OS-stable layer: hot-reload machinery + the OS-agnostic window.
 # A window never hot-updates — it is owned by the OS — so it lives here,
