@@ -33,7 +33,7 @@ static VkModuleGetManifestFn s_module_get_manifest = NULL;
 // Trampoline table (atomic)
 #define MAX_TRAMPOLINES 64
 typedef struct {
-    _Atomic(void *) ptr;
+    _Atomic(void*) ptr;
     char name[64];
 } Trampoline;
 
@@ -80,7 +80,7 @@ bool hot_vk_init_loader(VkInstance instance, VkPhysicalDevice phys,
     // TODO: load cache from disk if exists
     vkCreatePipelineCache(s_device, &cache_ci, NULL, &s_cache);
     
-    printf("[vk_loader] initialized (device=%p)\n", (void*)s_device);
+    printf("[vk_loader] initialized (device=%p)\n", (void*) s_device);
     return true;
 }
 
@@ -115,7 +115,7 @@ bool hot_vk_load_module(const char *path) {
     
     // Get manifest and verify ABI
     const VkModuleManifest *manifest = s_module_get_manifest();
-    printf("[vk_loader] loading %s v%s\n", manifest->name, manifest->version);
+    printf("[vk_loader] loading %s v%s\n", (*manifest).name, (*manifest).version);
     
     // Build the context
     VkHotContext context = {

@@ -88,7 +88,7 @@ bool VkModuleInit(const VkHotContext *context) {
     // The context is owned by the loader, don't copy it
     
     // Create pipeline cache (load from disk if exists)
-    s_cache = context->pipeline_cache;
+    s_cache = (*context).pipeline_cache;
     
     // Build pipelines
     // ...
@@ -105,7 +105,7 @@ bool VkModuleInit(const VkHotContext *context) {
     register_trampoline("vk_draw_rect", vk_draw_rect);
     register_trampoline("vk_draw_texture", vk_draw_texture);
     
-    printf("[vulkan] module initialized (device=%p)\n", (void*)context->device);
+    printf("[vulkan] module initialized (device=%p)\n", (void*) (*context).device);
     return true;
 }
 
