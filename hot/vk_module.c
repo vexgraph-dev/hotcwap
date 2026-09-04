@@ -9,6 +9,7 @@
 /**
  * ============================================================================
  * MODULE: Vk_module (hot/vk_module.c)
+ * LEVEL: L3 — Module Code (reloaded vulkan.dylib business logic)
  * ============================================================================
  * Vulkan module implementation.
  *

@@ -21,6 +21,7 @@
 /**
  * ============================================================================
  * MODULE: Window_linux (window/window_linux.c)
+ * LEVEL: L4 — Self-Management (Linux/X11 OS window backend)
  * ============================================================================
  * Linux/X11 backend for the Window API.
  *

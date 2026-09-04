@@ -33,6 +33,7 @@ typedef struct {
 /**
  * ============================================================================
  * MODULE: WindowTest (tests/window_test.c — Window class _test)
+ * LEVEL: L4 — Self-Management (tests L4 window chrome; takes level of what it runs)
  * ============================================================================
  * Two halves: one-shot chrome checks after create (title/size/constraints,
  * resizable toggle, minimize/restore), then a stepped traffic-light tour

@@ -9,6 +9,7 @@
 /**
  * ============================================================================
  * MODULE: Manifest (hot/manifest.c)
+ * LEVEL: L1 — File Metadata (manifest schema other files consume)
  * ============================================================================
  * Module manifest format.
  *

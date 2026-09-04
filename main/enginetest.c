@@ -27,6 +27,7 @@ typedef struct {
 /**
  * ============================================================================
  * MODULE: EngineTest (main/enginetest.c — windowed engine demo)
+ * LEVEL: L3 — Module Code (windowed engine demo harness)
  * ============================================================================
  * Showcase for the constructor-idiom Window API: construct hidden, mutate,
  * show, run the fixed-timestep loop until Esc or close. Polls state only —

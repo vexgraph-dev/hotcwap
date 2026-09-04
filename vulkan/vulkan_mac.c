@@ -13,6 +13,7 @@
 /**
  * ============================================================================
  * MODULE: Vulkan_mac (vulkan/vulkan_mac.c)
+ * LEVEL: L4 — Self-Management (MoltenVK loader and surface setup)
  * ============================================================================
  * macOS-specific Vulkan backend functions.
  *

@@ -25,6 +25,7 @@
 /**
  * ============================================================================
  * MODULE: Vulkan (vulkan/vulkan.c)
+ * LEVEL: L4 — Self-Management (runtime-loaded Vulkan chain setup)
  * ============================================================================
  * runtime-loaded Vulkan chain over the compositor model.
  *

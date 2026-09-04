@@ -21,6 +21,7 @@
 /**
  * ============================================================================
  * MODULE: Window (window/window.c)
+ * LEVEL: L4 — Self-Management (OS window backend persisting across swaps)
  * ============================================================================
  * platform-agnostic window API.
  *

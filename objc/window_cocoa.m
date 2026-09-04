@@ -38,6 +38,7 @@
 /**
  * ============================================================================
  * MODULE: Window_cocoa (objc/window_cocoa.m)
+ * LEVEL: L4 — Self-Management (AppKit OS window shim owned by the OS)
  * ============================================================================
  * the AppKit shim (the ".m" glue file).
  *

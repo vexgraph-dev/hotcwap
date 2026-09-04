@@ -11,6 +11,7 @@
 /**
  * ============================================================================
  * MODULE: Vk_loader (hot/vk_loader.c)
+ * LEVEL: L4 — Self-Management (owns VkDevice; loader machinery surviving reload)
  * ============================================================================
  * VkDevice owner and Vulkan module loader.
  *
