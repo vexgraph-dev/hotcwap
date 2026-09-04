@@ -1,0 +1,1680 @@
+// window_cocoa.m — the AppKit shim (the ".m" glue file).
+//
+// anti's core is pure C11; this is the ONE Objective-C file in the project.
+// It exists only to talk to AppKit, because NSWindow/NSApplication are ObjC
+// objects and there is no pure-C way to create them. Everything above this
+// boundary stays C; everything here is "dip into the OS, hand back a handle".
+//
+// Design notes:
+//   - sAppDelegate is created once per process (the app lifecycle delegate).
+//   - Each window gets its own AntiWindowDelegate so we can learn about the
+//     user clicking the red close button -> sets shouldClose -> engine loop
+//     sees it and exits (see window_demo.c).
+//   - setReleasedWhenClosed:NO is CRITICAL. The default (YES for programmatic
+//     windows) makes NSWindow free itself the moment it closes; our destroy()
+//     would then call close on freed memory = the segfault you saw. We own the
+//     window object; only destroy() releases it.
+
+#import <AppKit/AppKit.h>
+#import <Foundation/Foundation.h>
+#import <QuartzCore/QuartzCore.h>
+#import <stdatomic.h>
+
+#include "buffer/color_buffer.h"
+#include "window/window.h"
+// NOTE: no darling/panel.h here on purpose — it transitively typedefs
+// `Collection`, which collides with CarbonCore under AppKit imports. This
+// file only stores Panel pointers (opaque slots), never dereferences them;
+// window.h's forward typedef is all it needs.
+
+#include "input/focus.h"
+#include "input/key.h"
+#include "input/mouse.h"
+#include "input/touch.h"
+#include "time/nanotime.h"
+
+// Multi-tap window for double-click style counting (legacy parity: 250ms).
+static const uint64_t kTapThresholdNanos = 250000000ULL;
+
+// Carbon virtual keycode -> KEY_* code. -1 = unmapped. Same table the legacy
+// macOSWindow built (physical F1-F12, not Fn-doubled media keys).
+static int macKeyMap[128] = {
+    [0] = KEY_A,                   [1] = KEY_S,
+    [2] = KEY_D,                   [3] = KEY_F,
+    [4] = KEY_H,                   [5] = KEY_G,
+    [6] = KEY_Z,                   [7] = KEY_X,
+    [8] = KEY_C,                   [9] = KEY_V,
+    [11] = KEY_B,                  [12] = KEY_Q,
+    [13] = KEY_W,                  [14] = KEY_E,
+    [15] = KEY_R,                  [16] = KEY_Y,
+    [17] = KEY_T,                  [18] = KEY_NUM_1,
+    [19] = KEY_NUM_2,              [20] = KEY_NUM_3,
+    [21] = KEY_NUM_4,              [22] = KEY_NUM_6,
+    [23] = KEY_NUM_5,              [24] = KEY_EQUAL,
+    [25] = KEY_NUM_9,              [26] = KEY_NUM_7,
+    [27] = KEY_MINUS,              [28] = KEY_NUM_8,
+    [29] = KEY_NUM_0,              [30] = KEY_RIGHT_BRACKET,
+    [31] = KEY_O,                  [32] = KEY_U,
+    [33] = KEY_LEFT_BRACKET,       [34] = KEY_I,
+    [35] = KEY_P,                  [36] = KEY_ENTER,
+    [37] = KEY_L,                  [38] = KEY_J,
+    [39] = KEY_APOSTROPHE,         [40] = KEY_K,
+    [41] = KEY_SEMICOLON,          [42] = KEY_BACKSLASH,
+    [43] = KEY_COMMA,              [44] = KEY_SLASH,
+    [45] = KEY_N,                  [46] = KEY_M,
+    [47] = KEY_PERIOD,             [48] = KEY_TAB,
+    [49] = KEY_SPACE,              [50] = KEY_GRAVE_ACCENT,
+    [51] = KEY_BACKSPACE,          [53] = KEY_ESCAPE,
+    [96] = KEY_F5,                 [97] = KEY_F6,
+    [98] = KEY_F7,                 [99] = KEY_F3,
+    [100] = KEY_F8,                [101] = KEY_F9,
+    [103] = KEY_F11,               [109] = KEY_F10,
+    [111] = KEY_F12,               [118] = KEY_F4,
+    [120] = KEY_F2,                [122] = KEY_F1,
+    [123] = KEY_LEFT,              [124] = KEY_RIGHT,
+    [125] = KEY_DOWN,              [126] = KEY_UP,
+};
+
+// Cursor-lock state (Legacy: macOSWindow.lockWindowPtr/recenterIfLocked).
+// While locked the pointer is decoupled from motion and re-warped to the
+// window centre every pump pass; NSEvent deltas feed input.Mouse directly.
+static bool s_cursorLocked = false;
+static CGPoint s_lockCenter = {0, 0};
+
+// Window-lifecycle adapter registry capacity. Attach/dispatch are thread-0
+// operations, so the registry itself needs no synchronization.
+#define WINDOW_ADAPTER_MAX 16
+
+@class AntiWindowDelegate;
+
+// One opaque handle handed back to C. Holds both NS objects we must keep
+// alive: the window itself and its delegate. `id` is the engine's small
+// window number (1..7; 0 is the broadcast reserved id) used to tag input
+// events and route them to per-window listeners. sizeGeneration is the
+// resize-reflection counter: Thread 0 bumps it when the content rect moves.
+// renderGeneration is the same reflection trick for present POLICY: bumped
+// by the setters whenever the swapchain itself must be rebuilt
+// (presentMode / transparent). The container slot is polled fresh every
+// frame and never bumps it — its panel carries the clear color too.
+struct Window {
+    NSWindow *nsWindow;
+    AntiWindowDelegate *delegate;
+    bool shouldClose;
+    uint32_t id;
+    _Atomic uint64_t sizeGeneration;
+    int cachedWidth;
+    int cachedHeight;
+    double cachedX;          // top-left screen coords at last pump (move reflection)
+    double cachedY;
+    double cachedContentX;   // CONTENT top-left (below title bar), same space
+    double cachedContentY;
+
+    // --- present policy (renderer-facing atomic words) ---
+    _Atomic int presentMode;
+    _Atomic bool transparent;
+    _Atomic uint64_t renderGeneration;
+
+    // --- content root: nullptr => clear-only pass --
+    _Atomic(Panel*) container;
+    _Atomic(Panel*) contentPanel;  // UI tree (IOSurface-backed when native)
+    _Atomic(Panel*) scenePanel;    // Scene tree (Vulkan-backed)
+    _Atomic(bool) nativeContainer;  // IOSurface backing for content panel
+
+    // --- runtime state --
+    _Atomic bool enabled;    // false mutes ALL OS input for this window
+    bool lastFocused;        // focus-flip detection during the pump
+    _Atomic uint32_t monitorId; // CGDirectDisplayID mirror; 0 = unmapped
+
+    // --- window-lifecycle adapters (thread 0 only) ---
+    const WindowEvent *windowAdapters[WINDOW_ADAPTER_MAX];
+    int windowAdapterCount;
+
+    // --- resize-cadence render bridge (c -> objc -> c) ---
+    WindowResizeRenderFn resizeRenderFn;
+    void *resizeRenderUserdata;
+};
+
+// Window id registry: slot i holds the NSWindow currently owning id i (and
+// the C handle that owns that NSWindow). Ids are scarce on purpose (8 total)
+// — an engine does not open hundreds of windows. Slot 0 stays empty forever
+// (FOCUS_BROADCAST).
+#define WINDOW_ID_SLOTS 8
+static NSWindow *s_idToWindow[WINDOW_ID_SLOTS] = { nil };
+static Window *s_idToHandle[WINDOW_ID_SLOTS] = { nullptr };
+
+// Resolve an id for a newly created window, or 0 when the table is full.
+static uint32_t windowIdAcquire(NSWindow *window, Window *handle) {
+    for (uint32_t i = 1; i < WINDOW_ID_SLOTS; i++) {
+        if (s_idToWindow[i] == nil) {
+            s_idToWindow[i] = window;
+            s_idToHandle[i] = handle;
+            return i;
+        }
+    }
+    return FOCUS_BROADCAST;
+}
+
+static void windowIdRelease(uint32_t id) {
+    if (id != FOCUS_BROADCAST && id < WINDOW_ID_SLOTS) {
+        s_idToWindow[id] = nil;
+        s_idToHandle[id] = nullptr;
+    }
+}
+
+// Reverse lookup: which engine id does this OS window carry? 0 if unknown.
+static uint32_t windowIdOf(NSWindow *window) {
+    if (!window) return FOCUS_BROADCAST;
+    for (uint32_t i = 1; i < WINDOW_ID_SLOTS; i++)
+        if (s_idToWindow[i] == window) return i;
+    return FOCUS_BROADCAST;
+}
+
+static Window *windowHandleOf(NSWindow *window) {
+    if (!window) return nullptr;
+    for (uint32_t i = 1; i < WINDOW_ID_SLOTS; i++)
+        if (s_idToWindow[i] == window) return s_idToHandle[i];
+    return nullptr;
+}
+
+// Flipped content view so all sublayers and Cocoa geometry natively speak
+// TOP-LEFT coordinates (matching darling Container_resolve layout 1:1).
+@interface AntiContentView : NSView
+@end
+
+@implementation AntiContentView
+- (BOOL)isFlipped {
+    return YES;
+}
+@end
+
+// App-level delegate: receives lifecycle events for the whole application.
+// applicationShouldTerminateAfterLastWindowClosed lets the process end when
+// the last window goes away (normal for a game/engine run).
+@interface AntiAppDelegate : NSObject <NSApplicationDelegate>
+@property(nonatomic, assign) bool *shouldClosePtr;
+@end
+
+@implementation AntiAppDelegate
+- (void)applicationWillTerminate:(NSNotification*) notification {
+    (void) notification;
+    if (self.shouldClosePtr) *self.shouldClosePtr = true;
+}
+- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*) sender {
+    (void) sender;
+    return YES;
+}
+@end
+
+// Window-level delegate: this is how we learn the user clicked the close
+// button. windowWillClose fires as the window is being torn down; we flip the
+// bool the engine loop polls, then hand onCloseRequested to every attached
+// window adapter. The pointers are (assign) because the delegate must not
+// own our C struct.
+@interface AntiWindowDelegate : NSObject <NSWindowDelegate>
+@property(nonatomic, assign) bool *shouldClosePtr;
+@property(nonatomic, assign) Window *handlePtr;
+@end
+
+static void windowFireClose(Window *window);
+static void applyLayerGravity(Window *window);
+
+@implementation AntiWindowDelegate
+- (void) windowWillClose:(NSNotification*) notification {
+    (void) notification;
+    if (self.shouldClosePtr) *self.shouldClosePtr = true;
+    if (self.handlePtr) windowFireClose(self.handlePtr);
+}
+
+// Kill every animated frame change for this window. The OS's zoom animation
+// (double-click title bar) never renders in-process — WindowServer just scales
+// the window's stale committed bitmap between the two sizes, which reads as
+// smear/stretch no matter what the renderer does. Returning zero makes
+// setFrame:display:animate:YES land instantly: ONE real resize that the
+// TopLeft gravity law + resize-cadence bridge present honestly.
+- (NSTimeInterval)window:(NSWindow*) window animationResizeTime:(NSRect)newFrame {
+    (void) window;
+    (void) newFrame;
+    return 0.0;
+}
+
+// Resize-cadence choke points, both thread 0, both feeding the SAME render
+// hook the pump uses:
+//   willResize fires BEFORE the proposed size applies — the hook drains the
+//   runway (fence retire / final old-size present), so the frozen drawable
+//   CA shows during the border step is fresh and exact-sized (TopLeft crops
+//   it, never stretches).
+//   didResize fires AFTER each applied step — extents have moved, so the
+//   blocking sync present lands the new size's frame inside the same runloop
+//   turn the border moved.
+// Accept-always policy: return frameSize unchanged. Pacing lives in the
+// renderer's rebuild gate, not here.
+- (NSSize)windowWillResize:(NSWindow*) sender toSize:(NSSize)frameSize {
+    (void) sender;
+    Window *w = self.handlePtr;
+    if (w) {
+        NSRect content = [(*w).nsWindow contentRectForFrameRect:NSMakeRect(0, 0, frameSize.width, frameSize.height)];
+        (*w).cachedWidth = (int)content.size.width;
+        (*w).cachedHeight = (int)content.size.height;
+        if (atomic_load_explicit(&(*w).nativeContainer, memory_order_acquire)) {
+            Panel *contentPanel = atomic_load_explicit(&(*w).contentPanel, memory_order_acquire);
+            if (contentPanel) {
+                Window_compositeIOSurfaceChildren(w, contentPanel);
+            }
+        }
+        if ((*w).resizeRenderFn)
+            (*w).resizeRenderFn((*w).resizeRenderUserdata);
+    }
+    return frameSize;
+}
+
+- (void)windowDidResize:(NSNotification*) notification {
+    (void) notification;
+    Window *w = self.handlePtr;
+    if (w) {
+        NSRect content = [(*w).nsWindow contentRectForFrameRect:[(*w).nsWindow frame]];
+        (*w).cachedWidth = (int)content.size.width;
+        (*w).cachedHeight = (int)content.size.height;
+        if (atomic_load_explicit(&(*w).nativeContainer, memory_order_acquire)) {
+            Panel *contentPanel = atomic_load_explicit(&(*w).contentPanel, memory_order_acquire);
+            if (contentPanel) {
+                Window_compositeIOSurfaceChildren(w, contentPanel);
+            }
+        }
+        if ((*w).resizeRenderFn)
+            (*w).resizeRenderFn((*w).resizeRenderUserdata);
+    }
+}
+@end
+
+static AntiAppDelegate *sAppDelegate = nil; // one app delegate for the whole process
+static NSWindow *sLastWindow = nil;
+
+// Window-lifecycle adapter fan-out. All fire from thread 0 only.
+static void windowFireClose(Window *window) {
+    if (!window)
+        return;
+    for (int i = 0; i < (*window).windowAdapterCount; i++) {
+        const WindowEvent *a = (*window).windowAdapters[i];
+        if ((*a).onCloseRequested)
+            (*a).onCloseRequested((*a).self, window);
+    }
+}
+
+static void windowFireFocus(Window *window, bool focused) {
+    if (!window)
+        return;
+    for (int i = 0; i < (*window).windowAdapterCount; i++) {
+        const WindowEvent *a = (*window).windowAdapters[i];
+        if ((*a).onFocusChanged)
+            (*a).onFocusChanged((*a).self, window, focused);
+    }
+}
+
+static void windowFireResized(Window *window, int width, int height) {
+    if (!window)
+        return;
+    for (int i = 0; i < (*window).windowAdapterCount; i++) {
+        const WindowEvent *a = (*window).windowAdapters[i];
+        if ((*a).onResized)
+            (*a).onResized((*a).self, window, width, height);
+    }
+}
+
+static void windowFireMoved(Window *window, int x, int y) {
+    if (!window)
+        return;
+    for (int i = 0; i < (*window).windowAdapterCount; i++) {
+        const WindowEvent *a = (*window).windowAdapters[i];
+        if ((*a).onMoved)
+            (*a).onMoved((*a).self, window, x, y);
+    }
+}
+
+static void windowFireMonitorChanged(Window *window, uint32_t oldId, uint32_t newId) {
+    if (!window)
+        return;
+    for (int i = 0; i < (*window).windowAdapterCount; i++) {
+        const WindowEvent *a = (*window).windowAdapters[i];
+        if ((*a).onMonitorChanged)
+            (*a).onMonitorChanged((*a).self, window, oldId, newId);
+    }
+}
+
+// Resolve the CGDirectDisplayID of the screen carrying the greatest share of
+// this window. Returns 0 when no screen qualifies (headless, fully off-screen
+// with no intersection, or screens list empty).
+static uint32_t resolveMonitorId(Window *window) {
+    if (!window)
+        return 0;
+    @autoreleasepool {
+        NSScreen *screen = [(*window).nsWindow screen];
+        if (!screen)
+            return 0;
+        NSNumber *displayId = [[screen deviceDescription] objectForKey:@"NSScreenNumber"];
+        return displayId ? (uint32_t)[displayId unsignedIntValue] : 0;
+    }
+}
+
+// Mirror the OS's monitor assignment into the atomic word; fires adapters on
+// flip. Thread 0 only.
+static void refreshMonitorId(Window *window) {
+    if (!window)
+        return;
+    uint32_t next = resolveMonitorId(window);
+    uint32_t prev = atomic_exchange_explicit(&(*window).monitorId, next,
+                                             memory_order_acq_rel);
+    if (prev != next)
+        windowFireMonitorChanged(window, prev, next);
+}
+
+// Re-centre the cursor during the pump while locked, so the warp registers
+// before the next event loop exit (legacy recenterIfLocked).
+static void recenterIfLocked(void) {
+    if (!s_cursorLocked) return;
+    CGWarpMouseCursorPosition(s_lockCenter);
+}
+
+// Content-area coordinates (top-left origin) for a mouse event. Events that
+// miss every window fall back to raw screen-space values.
+static void mouseLocation(NSEvent *event, double *outX, double *outY) {
+    NSPoint p = [event locationInWindow];
+    double x = p.x;
+    double y = p.y;
+    NSWindow *eventWindow = [event window];
+    if (eventWindow) {
+        NSRect content = [[eventWindow contentView] frame];
+        y = content.size.height - y; // flip to top-left origin
+    }
+    *outX = x;
+    *outY = y;
+}
+
+// Map an NSTouch phase onto the Touch_* action codes.
+static int touchAction(NSTouchPhase phase) {
+    if (phase & NSTouchPhaseBegan) return TOUCH_DOWN;
+    if (phase & (NSTouchPhaseMoved | NSTouchPhaseStationary)) return TOUCH_MOVE;
+    if (phase & NSTouchPhaseEnded) return TOUCH_UP;
+    return TOUCH_CANCEL;
+}
+
+// Feed one gesture/touch carrier event into input.Touch: resolve each active
+// touch into its slot (identity hash % TOUCH_MAX), normalize position into
+// content coords, and estimate pressure from the resting flag (legacy parity).
+static void dispatchTouches(NSEvent *event, uint32_t wid) {
+    NSWindow *eventWindow = [event window];
+    if (!eventWindow) return;
+    NSView *contentView = [eventWindow contentView];
+    if (!contentView) return;
+
+    NSSet *touches = [event touchesMatchingPhase:NSTouchPhaseAny inView:contentView];
+    if (!touches || touches.count == 0) return;
+
+    NSRect frame = [contentView frame];
+    double winW = frame.size.width;
+    double winH = frame.size.height;
+
+    for (NSTouch *touch in touches) {
+        NSUInteger slot = [[touch identity] hash] % TOUCH_MAX;
+        NSPoint norm = [touch normalizedPosition];
+        double posX = norm.x * winW;
+        double posY = (1.0 - norm.y) * winH;
+        double pressure = [touch isResting] ? 0.2 : 0.8;
+        Touch_pushTouchEvent(wid, (int)slot, touchAction([touch phase]),
+                             posX, posY, pressure, kTapThresholdNanos);
+    }
+}
+
+// Intercept-and-forward: read everything the engine cares about off each OS
+// event, push it into the input modules, then hand the event back to AppKit
+// so the responder chain keeps working. This is the Thread-0 producer side of
+// the input pipeline.
+static void routeEvent(NSEvent *event) {
+    NSEventType type = [event type];
+    // Which engine window did the OS deliver this to? Tagged on every queued
+    // event so dispatch routes it to that window's listeners only.
+    uint32_t wid = windowIdOf([event window]);
+
+    // Disabled windows receive nothing: events never enter the device rings,
+    // so adapters stay silent and polling state freezes. AppKit still gets
+    // the event via sendEvent — only OUR input pipeline is muted.
+    Window *target = (wid != FOCUS_BROADCAST) ? windowHandleOf([event window]) : nullptr;
+    if (target && !atomic_load_explicit(&(*target).enabled, memory_order_relaxed))
+        return;
+
+    switch (type) {
+        case NSEventTypeKeyDown:
+        case NSEventTypeKeyUp: {
+            short macCode = [event keyCode];
+            if (macCode >= 0 && macCode < 128) {
+                int stdKey = macKeyMap[macCode];
+                if (stdKey != -1)
+                    Key_pushEvent(wid, stdKey,
+                                  type == NSEventTypeKeyDown ? KEY_ACTION_DOWN : KEY_ACTION_UP,
+                                  kTapThresholdNanos);
+                if (type == NSEventTypeKeyDown && stdKey != -1) {
+                    NSString *chars = [event characters];
+                    if (chars.length > 0) {
+                        unsigned char c0 = (unsigned char)[chars characterAtIndex:0];
+                        if (c0 > 0) Key_pushCharEvent(wid, c0);
+                    }
+                }
+            }
+            break;
+        }
+
+        case NSEventTypeScrollWheel:
+            Mouse_pushScrollEvent(wid, [event scrollingDeltaX], [event scrollingDeltaY]);
+            break;
+
+        case NSEventTypeMagnify:
+            Mouse_pushZoomEvent(wid, [event magnification]);
+            break;
+
+        case NSEventTypeLeftMouseDown:
+        case NSEventTypeRightMouseDown:
+        case NSEventTypeOtherMouseDown: {
+            int button = (type == NSEventTypeLeftMouseDown) ? MOUSE_LEFT
+                       : ((type == NSEventTypeRightMouseDown) ? MOUSE_RIGHT
+                                                              : (int)[event buttonNumber]);
+            Mouse_pushButtonEvent(wid, button, KEY_ACTION_DOWN, kTapThresholdNanos);
+            // Clicks also refresh the tracked cursor position (legacy parity).
+            double x, y;
+            mouseLocation(event, &x, &y);
+            Mouse_pushMoveEvent(wid, x, y);
+            break;
+        }
+
+        case NSEventTypeLeftMouseUp:
+        case NSEventTypeRightMouseUp:
+        case NSEventTypeOtherMouseUp: {
+            int button = (type == NSEventTypeLeftMouseUp) ? MOUSE_LEFT
+                       : ((type == NSEventTypeRightMouseUp) ? MOUSE_RIGHT
+                                                             : (int)[event buttonNumber]);
+            Mouse_pushButtonEvent(wid, button, KEY_ACTION_UP, kTapThresholdNanos);
+            double x, y;
+            mouseLocation(event, &x, &y);
+            Mouse_pushMoveEvent(wid, x, y);
+            break;
+        }
+
+        case NSEventTypeMouseMoved:
+        case NSEventTypeLeftMouseDragged:
+        case NSEventTypeRightMouseDragged:
+        case NSEventTypeOtherMouseDragged: {
+            if (s_cursorLocked) {
+                // Locked: AppKit reports a constant anchor with real deltas.
+                Mouse_pushMoveDeltaEvent(wid, [event deltaX], [event deltaY]);
+                break;
+            }
+            double x, y;
+            mouseLocation(event, &x, &y);
+            if (type == NSEventTypeMouseMoved) {
+                Mouse_pushMoveEvent(wid, x, y);
+            } else {
+                int button = (type == NSEventTypeLeftMouseDragged) ? MOUSE_LEFT
+                           : ((type == NSEventTypeRightMouseDragged) ? MOUSE_RIGHT
+                                                                      : (int)[event buttonNumber]);
+                Mouse_pushDragEvent(wid, button, x, y);
+            }
+            break;
+        }
+
+        case NSEventTypeGesture:
+        case NSEventTypeBeginGesture:
+        case NSEventTypeEndGesture:
+            dispatchTouches(event, wid);
+            break;
+
+        default:
+            break;
+    }
+}
+
+// Drain the OS event queue. Called every frame from the engine loop (the
+// "poll" half of poll-then-tick). Returns immediately; never blocks. After
+// the pump, mirror the OS's key window into the focus word so the rest of
+// the engine can ask "who is focused?" without touching AppKit.
+void Window_pollEvents(void) {
+    @autoreleasepool {
+        NSEvent *event;
+        while ((event = [NSApp nextEventMatchingMask:NSEventMaskAny
+                                            untilDate:[NSDate distantPast]
+                                               inMode:NSDefaultRunLoopMode
+                                              dequeue:YES])) {
+            routeEvent(event);
+            [NSApp sendEvent:event];
+        }
+        [NSApp updateWindows];
+        recenterIfLocked();
+        Focus_set(windowIdOf([NSApp keyWindow]));
+
+        // Resize + move reflection: compare the live frame against the cache
+        // and bump the generation / fire adapters only on an actual change,
+        // so a renderer polling once per frame pays one int compare.
+        for (uint32_t i = 1; i < WINDOW_ID_SLOTS; i++) {
+            NSWindow *w = s_idToWindow[i];
+            if (!w) continue;
+            Window *handle = windowHandleOf(w);
+            if (!handle) continue;
+            NSRect content = [w contentRectForFrameRect:[w frame]];
+            int cw = (int)content.size.width;
+            int ch = (int)content.size.height;
+            bool rectChanged = false;
+            if (cw != (*handle).cachedWidth || ch != (*handle).cachedHeight) {
+                (*handle).cachedWidth = cw;
+                (*handle).cachedHeight = ch;
+                atomic_fetch_add_explicit(&(*handle).sizeGeneration, 1, memory_order_release);
+                windowFireResized(handle, cw, ch);
+                rectChanged = true;
+            }
+
+            // Move reflection: top-left screen coords, same space setLocation
+            // speaks (AppKit origin is bottom-left; convert on the way out).
+            NSRect frame = [w frame];
+            CGFloat screenHeight = [[NSScreen mainScreen] frame].size.height;
+            double tx = (double)frame.origin.x;
+            double ty = (double)(screenHeight - frame.origin.y - frame.size.height);
+            if (tx != (*handle).cachedX || ty != (*handle).cachedY) {
+                (*handle).cachedX = tx;
+                (*handle).cachedY = ty;
+                windowFireMoved(handle, (int)tx, (int)ty);
+                rectChanged = true;
+            }
+
+            // Content origin: chrome-aware twin of the frame cache — the
+            // collage joins against this, not the title-bar-included frame.
+            double cx = (double)frame.origin.x;
+            double cy = (double)(screenHeight - content.origin.y - content.size.height);
+            (*handle).cachedContentX = cx;
+            (*handle).cachedContentY = cy;
+
+            // Focus flip: mirror the OS spotlight into per-window adapters.
+            bool focused = (windowIdOf([NSApp keyWindow]) == (*handle).id);
+            if (focused != (*handle).lastFocused) {
+                (*handle).lastFocused = focused;
+                windowFireFocus(handle, focused);
+            }
+
+            // Monitor mirror: resolve the carrying display, flip the atomic,
+            // fire adapters only when the window changed screens.
+            refreshMonitorId(handle);
+
+            // Gravity contract: TopLeft is UNCONDITIONAL POLICY, asserted
+            // every pass on thread 0 before any present can sample the
+            // layer. There is no stretch mode to fall back into.
+            applyLayerGravity(handle);
+
+            // Resize-cadence bridge: geometry moved this pass -> hand thread
+            // 0's fresh caches straight to the compositor renderer. Runs
+            // INSIDE AppKit's event servicing, at the OS's own rhythm.
+            if (rectChanged && (*handle).resizeRenderFn)
+                (*(*handle).resizeRenderFn)((*handle).resizeRenderUserdata);
+
+            // IOSurface content panel: attach/position child CALayers on the content view
+            if (atomic_load_explicit(&(*handle).nativeContainer, memory_order_acquire)) {
+                Panel *contentPanel = atomic_load_explicit(&(*handle).contentPanel, memory_order_acquire);
+                if (contentPanel) {
+                    Window_compositeIOSurfaceChildren(handle, contentPanel);
+                }
+            }
+
+            // Discriminator probe: who is stretching? Log what the layer
+            // ACTUALLY carries while the window is being abused. If gravity
+            // ever reads anything but topLeft, someone replaced our layer.
+            static int s_probeInit = 0;
+            static bool s_probe = false;
+            static uint64_t s_probeTick = 0;
+            if (!s_probeInit) {
+                s_probeInit = 1;
+                s_probe = getenv("ANTI_VK_TRACE") != nullptr;
+            }
+            if (s_probe && (++s_probeTick % 30 == 0)) {
+                @autoreleasepool {
+                    NSView *view = [(*handle).nsWindow contentView];
+                    NSString *g = [(id)view.layer contentsGravity];
+                    CGSize ds = CGSizeZero;
+                    if ([view.layer isKindOfClass:[CAMetalLayer class]])
+                        ds = ((CAMetalLayer*) view.layer).drawableSize;
+                    NSLog(@"vk:probe frame=%.0fx%.0f content=%dx%d gravity=%@ drawable=%.0fx%.0f",
+                          [(*handle).nsWindow frame].size.width,
+                          [(*handle).nsWindow frame].size.height,
+                          (*handle).cachedWidth, (*handle).cachedHeight,
+                          g, ds.width, ds.height);
+                }
+            }
+        }
+    }
+}
+
+// Build the NSWindow + C handle. Shared by every constructor. The window is
+// created HIDDEN — visibility is an explicit Window_show() decision, so
+// construct -> mutate -> show never flashes a half-configured window.
+static Window *windowAlloc(const WindowDesc *desc) {
+    @autoreleasepool {
+        if (!NSApp) {
+            [NSApplication sharedApplication];   // bootstrap the app object once
+        }
+        if (!sAppDelegate) {
+            sAppDelegate = [[AntiAppDelegate alloc] init];
+            [NSApp setDelegate:sAppDelegate];
+            [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+            [NSApp activateIgnoringOtherApps:YES];
+        }
+
+        NSRect frame = NSMakeRect(0, 0, (CGFloat)(*desc).width, (CGFloat)(*desc).height);
+
+        NSWindowStyleMask style = NSWindowStyleMaskTitled
+                                | NSWindowStyleMaskClosable
+                                | NSWindowStyleMaskMiniaturizable
+                                | NSWindowStyleMaskResizable;
+
+        NSWindow *window = [[NSWindow alloc]
+            initWithContentRect:frame
+                      styleMask:style
+                         backing:NSBackingStoreBuffered
+                           defer:NO];
+        [window setTitle:[NSString stringWithUTF8String:(*desc).title]];
+        [window setReleasedWhenClosed:NO];   // we own the window object; close must not free it
+
+        AntiContentView *contentView = [[AntiContentView alloc] initWithFrame:frame];
+        [window setContentView:contentView];
+
+        // Green traffic light enters native fullscreen (mirrors legacy allocate()).
+        [window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenPrimary];
+
+        // Disable AppKit's live-resize content-preservation scale so pinned
+        // content is never stretched to the new size during a drag.
+        [window setPreservesContentDuringLiveResize:NO];
+
+        // Trackpad touch delivery: the content view must opt in. The modern
+        // allowedTouchTypes API replaces the deprecated setAcceptsTouchEvents:.
+        [window.contentView setAllowedTouchTypes:NSTouchTypeMaskDirect | NSTouchTypeMaskIndirect];
+
+        AntiWindowDelegate *delegate = [[AntiWindowDelegate alloc] init];
+        [window setDelegate:delegate];
+
+        Window *w = (Window*) calloc(1, sizeof(Window));
+        (*w).nsWindow = window;
+        (*w).delegate = delegate;
+        (*w).shouldClose = false;
+        atomic_store_explicit(&(*w).sizeGeneration, 0, memory_order_relaxed);
+        NSRect initialContent = [window contentRectForFrameRect:[window frame]];
+        (*w).cachedWidth = (int)initialContent.size.width;
+        (*w).cachedHeight = (int)initialContent.size.height;
+        NSRect initialFrame = [window frame];
+        CGFloat screenH = [[NSScreen mainScreen] frame].size.height;
+        (*w).cachedX = (double)initialFrame.origin.x;
+        (*w).cachedY = (double)(screenH - initialFrame.origin.y - initialFrame.size.height);
+        NSRect initialContentRect = initialContent;
+        (*w).cachedContentX = (double)initialFrame.origin.x
+                              + (double)(initialContentRect.origin.x - initialFrame.origin.x);
+        (*w).cachedContentY = (double)(screenH - initialContentRect.origin.y - initialContentRect.size.height);
+        atomic_store_explicit(&(*w).presentMode, WINDOW_PRESENT_FIFO, memory_order_relaxed);
+        atomic_store_explicit(&(*w).transparent, false, memory_order_relaxed);
+        atomic_store_explicit(&(*w).renderGeneration, 0, memory_order_relaxed);
+        atomic_store_explicit(&(*w).container, nullptr, memory_order_relaxed);
+        atomic_store_explicit(&(*w).enabled, true, memory_order_relaxed);
+        (*w).lastFocused = false;
+        atomic_store_explicit(&(*w).monitorId, 0, memory_order_relaxed);
+        (*w).windowAdapterCount = 0;
+        (*w).id = windowIdAcquire(window, w);
+        delegate.shouldClosePtr = &(*w).shouldClose;
+        delegate.handlePtr = w;
+
+        sLastWindow = window;
+
+        return w;
+    }
+}
+
+// Merge a caller's Desc over the defaults. Unset (zero) fields fall back —
+// this is what makes partial designated initializers behave like overloads.
+static WindowDesc descResolve(const WindowDesc *desc) {
+    WindowDesc d = { .title = "anti", .width = 800, .height = 600, .x = 0, .y = 0 };
+    if (!desc)
+        return d;
+    if ((*desc).title) d.title = (*desc).title;
+    if ((*desc).width > 0) d.width = (*desc).width;
+    if ((*desc).height > 0) d.height = (*desc).height;
+    d.x = (*desc).x;
+    d.y = (*desc).y;
+    d.centered = (*desc).centered;
+    d.shown = (*desc).shown;
+    return d;
+}
+
+// Default constructor: hidden, 800x600, "anti".
+Window *Window_0(void) {
+    return windowAlloc(&(WindowDesc){ .title = "anti", .width = 800, .height = 600 });
+}
+
+// One-arg overload: titled, hidden.
+Window *Window_1(const char *title) {
+    return windowAlloc(&(WindowDesc){ .title = title, .width = 800, .height = 600 });
+}
+
+// Parameterized constructor: Desc fields applied on top of defaults.
+Window *Window_new(const WindowDesc *desc) {
+    WindowDesc d = descResolve(desc);
+    Window *w = windowAlloc(&d);
+    if (!w)
+        return nullptr;
+    if (d.centered)
+        Window_center(w);
+    else if (d.x != 0 || d.y != 0)
+        Window_setLocation(w, d.x, d.y);
+    if (d.shown)
+        Window_show(w);
+    return w;
+}
+
+// Legacy-style convenience constructor: titled + sized, still hidden.
+Window *Window_create(const char *title, int width, int height) {
+    return Window_new(&(WindowDesc){ .title = title, .width = width, .height = height });
+}
+
+// Tear down the window and free the handle. Safe to call whether the user
+// already closed the window or not: if it's still open we close it, and we
+// detach the delegate first so no callback can touch our freed memory.
+void Window_destroy(Window *window) {
+    if (!window) return;
+    @autoreleasepool {
+        [(*window).nsWindow setDelegate:nil];   // detach: no callbacks into freed struct
+        if (!(*window).shouldClose) {
+            [(*window).nsWindow close];
+        }
+        // Drop the id and any listeners still scoped to it so nothing dangles.
+        Key_detachWindowAll((*window).id);
+        Mouse_detachWindowAll((*window).id);
+        Touch_detachWindowAll((*window).id);
+        windowIdRelease((*window).id);
+    }
+    free(window);
+}
+
+bool Window_shouldClose(Window *window) {
+    return window ? (*window).shouldClose : true;
+}
+
+// --- Present policy -----------------------------------------------------------
+// Plain atomic words on the handle. presentMode and transparent participate
+// in swapchain creation, so changing either bumps renderGeneration; color and
+// container are per-frame polled and never do.
+
+void Window_setPresentMode(Window *window, int mode) {
+    if (!window)
+        return;
+    int prev = atomic_exchange_explicit(&(*window).presentMode, mode, memory_order_relaxed);
+    if (prev != mode)
+        atomic_fetch_add_explicit(&(*window).renderGeneration, 1, memory_order_release);
+}
+
+int Window_getPresentMode(const Window *window) {
+    return window ? atomic_load_explicit(&(*window).presentMode, memory_order_relaxed)
+                  : WINDOW_PRESENT_FIFO;
+}
+
+void Window_setTransparent(Window *window, bool transparent) {
+    if (!window)
+        return;
+    bool prev = atomic_exchange_explicit(&(*window).transparent, transparent, memory_order_relaxed);
+    if (prev != transparent)
+        atomic_fetch_add_explicit(&(*window).renderGeneration, 1, memory_order_release);
+}
+
+bool Window_isTransparent(const Window *window) {
+    return window ? atomic_load_explicit(&(*window).transparent, memory_order_relaxed)
+                  : false;
+}
+
+uint64_t Window_renderGeneration(const Window *window) {
+    return window ? atomic_load_explicit(&(*window).renderGeneration, memory_order_acquire) : 0;
+}
+
+// --- Content: the ONE container slot ------------------------------------------
+
+void Window_setContainer(Window *window, Panel *root) {
+    if (!window)
+        return;
+    atomic_store_explicit(&(*window).container, root, memory_order_release);
+}
+
+Panel *Window_getContainer(const Window *window) {
+    return window ? atomic_load_explicit(&(*window).container, memory_order_acquire) : nullptr;
+}
+
+void Window_setContentPanel(Window *window, Panel *panel) {
+    if (!window)
+        return;
+    atomic_store_explicit(&(*window).contentPanel, panel, memory_order_release);
+    // Content panel itself is a logical placeholder — IOSurface backing
+    // goes on its children, not the panel itself.
+}
+
+Panel *Window_getContentPanel(const Window *window) {
+    return window ? atomic_load_explicit(&(*window).contentPanel, memory_order_acquire) : nullptr;
+}
+
+void Window_setScenePanel(Window *window, Panel *panel) {
+    if (!window)
+        return;
+    atomic_store_explicit(&(*window).scenePanel, panel, memory_order_release);
+}
+
+Panel *Window_getScenePanel(const Window *window) {
+    return window ? atomic_load_explicit(&(*window).scenePanel, memory_order_acquire) : nullptr;
+}
+
+void Window_forceNativeContainerOnRoot(Window *window, bool flag) {
+    if (!window)
+        return;
+    bool wasFlag = atomic_load_explicit(&(*window).nativeContainer, memory_order_acquire);
+    atomic_store_explicit(&(*window).nativeContainer, flag, memory_order_release);
+    // When enabling, attach IOSurface backing to non-scene children
+    // of the content panel. The content panel itself stays as a logical
+    // placeholder.
+    if (flag && !wasFlag) {
+        Panel *contentPanel = atomic_load_explicit(&(*window).contentPanel, memory_order_acquire);
+        if (contentPanel) {
+            int w = Window_width(window);
+            int h = Window_height(window);
+            if (w <= 0) w = (*window).cachedWidth > 0 ? (*window).cachedWidth : 800;
+            if (h <= 0) h = (*window).cachedHeight > 0 ? (*window).cachedHeight : 600;
+            Window_attachPanelIOSurface(window, contentPanel, w, h);
+        }
+        // Ensure the contentView has a layer for compositing
+        NSWindow *nsWindow = (*window).nsWindow;
+        if (nsWindow) {
+            NSView *contentView = [nsWindow contentView];
+            if (contentView) [contentView setWantsLayer:YES];
+        }
+    }
+}
+
+bool Window_isNativeContainerOnRoot(const Window *window) {
+    return window ? atomic_load_explicit(&(*window).nativeContainer, memory_order_acquire) : false;
+}
+
+// --- IOSurface panel bridge (C callable from renderer) ------------------------
+//
+// Child-iteration logic lives in panel_bridge.c (a pure-C file that can
+// see panel.h). This file just calls into it. Thread 0 only.
+
+bool Window_attachPanelIOSurface(Window *window, Panel *panel, int width, int height) {
+    if (!window || !panel) return false;
+    extern int anti_AttachPanelIOSurfaceChildren(Window *, Panel *, int, int);
+    // Attach IOSurface backing to ALL children of the content panel
+    return anti_AttachPanelIOSurfaceChildren(window, panel, width, height) >= 0;
+}
+
+bool Window_resizePanelIOSurface(Window *window, Panel *panel, int width, int height) {
+    if (!window || !panel) return false;
+    extern int anti_ResizePanelIOSurfaceChildren(Window *, Panel *, int, int);
+    return anti_ResizePanelIOSurfaceChildren(window, panel, width, height) >= 0;
+}
+
+void *Window_getPanelLayer(Window *window, Panel *panel) {
+    if (!window || !panel) return nullptr;
+    extern void *PanelCocoa_fromPanel(void *panel);
+    extern void *PanelCocoa_layer(void *pc);
+    void *pc = PanelCocoa_fromPanel(panel);
+    return pc ? PanelCocoa_layer(pc) : nullptr;
+}
+
+void Window_compositeIOSurfaceChildren(Window *window, Panel *contentPanel) {
+    if (!window || !contentPanel) return;
+    
+    // CoreAnimation strictly requires layer tree mutations to occur on the main thread.
+    // If the Vulkan background worker calls this, it must be asynchronously dispatched.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSWindow *nsWindow = (*window).nsWindow;
+        if (!nsWindow) return;
+        NSView *contentView = [nsWindow contentView];
+        if (!contentView) return;
+        
+        NSView *vulkanView = nil;
+        for (NSView *v in [contentView subviews]) {
+            if ([NSStringFromClass([v class]) isEqualToString:@"AntiVulkanView"]) {
+                vulkanView = v;
+                break;
+            }
+        }
+        if (!vulkanView) return;
+
+        CALayer *rootLayer = [vulkanView layer];
+        if (!rootLayer) return;
+
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+
+        extern int anti_GetChildCount(Panel *contentPanel);
+        extern Panel *anti_GetChildAt(Panel *contentPanel, int index);
+        extern void anti_GetChildLayout(Panel *child, float winW, float winH, float *outX, float *outY, float *outW, float *outH);
+        extern int anti_GetChildParentAnchor(Panel *child);
+        extern int anti_GetChildSelfAnchor(Panel *child);
+        extern void *PanelCocoa_fromPanel(void *panel);
+        extern void *PanelCocoa_layer(void *pc);
+        extern void PanelCocoa_setAnchors(void *pc, int parentAnchor, int selfAnchor);
+
+        // Add/update CALayers for each child
+        int childCount = anti_GetChildCount(contentPanel);
+        for (int i = 0; i < childCount; i++) {
+            Panel *child = anti_GetChildAt(contentPanel, i);
+            if (!child) continue;
+            void *pc = PanelCocoa_fromPanel(child);
+            if (!pc) continue;
+
+            CALayer *childLayer = (__bridge CALayer*) PanelCocoa_layer(pc);
+            if (!childLayer) continue;
+
+            // Surface is pre-rendered at native pixel resolution — tell CA not to scale it.
+            childLayer.contentsScale = 1.0;
+
+            // Apply anchor settings to layer (contentsGravity + autoresizingMask)
+            int parentAnchor = anti_GetChildParentAnchor(child);
+            int selfAnchor = anti_GetChildSelfAnchor(child);
+            PanelCocoa_setAnchors(pc, parentAnchor, selfAnchor);
+
+            // Get layout rect for positioning
+            float rx, ry, rw, rh;
+            anti_GetChildLayout(child, (float)Window_width(window), (float)Window_height(window), &rx, &ry, &rw, &rh);
+            [childLayer setFrame:CGRectMake(rx, ry, rw, rh)];
+
+            // Add to root layer if not already there
+            if ([childLayer superlayer] != rootLayer) {
+                [rootLayer addSublayer:childLayer];
+            }
+        }
+        [CATransaction commit];
+    });
+}
+
+// --- Runtime state -------------------------------------------------------------
+
+void Window_setEnabled(Window *window, bool enabled) {
+    if (!window)
+        return;
+    atomic_store_explicit(&(*window).enabled, enabled, memory_order_relaxed);
+}
+
+bool Window_isEnabled(const Window *window) {
+    return window ? atomic_load_explicit(&(*window).enabled, memory_order_relaxed) : false;
+}
+
+// ---------------------------------------------------------------------------
+// Chrome / state API. Mirrors the legacy macOSWindow method surface.
+// NSWindowStyleMask bits line up 1:1 with the legacy constants (Resizable 1<<3,
+// FullScreen 1<<14, FullSizeContentView 1<<15).
+// ---------------------------------------------------------------------------
+
+static NSWindowStyleMask styleMaskOf(Window *window) {
+    return [(*window).nsWindow styleMask];
+}
+
+static bool hasStyleBit(Window *window, NSWindowStyleMask bit) {
+    return (styleMaskOf(window) & bit) != 0;
+}
+
+// Single mask-rewrite path for all capability toggles. While native fullscreen
+// AppKit owns the mask (the FullScreen bit can only change inside a transition),
+// so style mutations are skipped then — mirroring the Ghostty guard. When not
+// fullscreen the bit is never present, so it is never forced via setStyleMask:.
+static void updateStyleMask(Window *window, NSWindowStyleMask add, NSWindowStyleMask clear) {
+    NSWindowStyleMask mask = styleMaskOf(window);
+    if ((mask & NSWindowStyleMaskFullScreen) != 0)
+        return;
+    [(*window).nsWindow setStyleMask:(mask & ~clear) | add];
+}
+
+void Window_setTitle(Window *window, const char *title) {
+    if (!window || !title)
+        return;
+    @autoreleasepool {
+        [(*window).nsWindow setTitle:[NSString stringWithUTF8String:title]];
+
+        // macOS 15+ re-reveals the native title view whenever the title string
+        // changes, even when titleVisibility is hidden. Re-apply the hidden
+        // state for FullSizeContentView (NAKED) windows, mirroring legacy.
+        if ((styleMaskOf(window) & NSWindowStyleMaskFullSizeContentView) != 0) {
+            [(*window).nsWindow setTitlebarAppearsTransparent:YES];
+            [(*window).nsWindow setTitleVisibility:NSWindowTitleHidden];
+        }
+    }
+}
+
+int Window_width(Window *window) {
+    if (!window)
+        return 0;
+    return (int)[(*window).nsWindow contentRectForFrameRect:[(*window).nsWindow frame]].size.width;
+}
+
+int Window_height(Window *window) {
+    if (!window)
+        return 0;
+    return (int)[(*window).nsWindow contentRectForFrameRect:[(*window).nsWindow frame]].size.height;
+}
+
+void Window_setSize(Window *window, int width, int height) {
+    if (!window)
+        return;
+    @autoreleasepool {
+        [(*window).nsWindow setContentSize:NSMakeSize((CGFloat)width, (CGFloat)height)];
+    }
+}
+
+void Window_setLocation(Window *window, int x, int y) {
+    if (!window)
+        return;
+    @autoreleasepool {
+        NSRect screen = [[NSScreen mainScreen] frame];
+        [(*window).nsWindow setFrameTopLeftPoint:NSMakePoint((CGFloat)x, screen.size.height - (CGFloat)y)];
+    }
+}
+
+// Mirrors the cached top-left desktop coords the pump already maintains for
+// move reflection — no AppKit call needed on the read path.
+void Window_getLocation(const Window *window, int *outX, int *outY) {
+    if (outX)
+        *outX = window ? (int)(*window).cachedX : 0;
+    if (outY)
+        *outY = window ? (int)(*window).cachedY : 0;
+}
+
+void Window_getContentOrigin(const Window *window, int *outX, int *outY) {
+    if (outX)
+        *outX = window ? (int)(*window).cachedContentX : 0;
+    if (outY)
+        *outY = window ? (int)(*window).cachedContentY : 0;
+}
+
+void Window_center(Window *window) {
+    if (!window)
+        return;
+    @autoreleasepool {
+        [(*window).nsWindow center];
+    }
+}
+
+void Window_show(Window *window) {
+    if (!window)
+        return;
+    @autoreleasepool {
+        // Modern activation: activateIgnoringOtherApps: is deprecated and
+        // unreliable on recent macOS (leaves traffic lights greyed).
+        [[NSRunningApplication currentApplication]
+            activateWithOptions:NSApplicationActivateAllWindows];
+        [(*window).nsWindow makeKeyAndOrderFront:nil];
+        // Prime the monitor mirror eagerly: a window that just became
+        // visible should know where it lives before the first pump.
+        refreshMonitorId(window);
+    }
+}
+
+void Window_hide(Window *window) {
+    if (!window)
+        return;
+    @autoreleasepool {
+        [(*window).nsWindow orderOut:nil];
+    }
+}
+
+void Window_setVisible(Window *window, bool visible) {
+    if (visible)
+        Window_show(window);
+    else
+        Window_hide(window);
+}
+
+bool Window_isResizable(Window *window) {
+    if (!window)
+        return false;
+    return hasStyleBit(window, NSWindowStyleMaskResizable);
+}
+
+void Window_setResizable(Window *window, bool resizable) {
+    if (!window)
+        return;
+    updateStyleMask(window, resizable ? NSWindowStyleMaskResizable : 0, resizable ? 0 : NSWindowStyleMaskResizable);
+}
+
+bool Window_isClosable(Window *window) {
+    if (!window)
+        return false;
+    return hasStyleBit(window, NSWindowStyleMaskClosable);
+}
+
+void Window_setClosable(Window *window, bool closable) {
+    if (!window)
+        return;
+    updateStyleMask(window, closable ? NSWindowStyleMaskClosable : 0, closable ? 0 : NSWindowStyleMaskClosable);
+}
+
+bool Window_isMiniaturizable(Window *window) {
+    if (!window)
+        return false;
+    return hasStyleBit(window, NSWindowStyleMaskMiniaturizable);
+}
+
+void Window_setMiniaturizable(Window *window, bool miniaturizable) {
+    if (!window)
+        return;
+    updateStyleMask(window, miniaturizable ? NSWindowStyleMaskMiniaturizable : 0, miniaturizable ? 0 : NSWindowStyleMaskMiniaturizable);
+}
+
+void Window_setFullscreenButton(Window *window, bool enabled) {
+    if (!window)
+        return;
+    @autoreleasepool {
+        NSWindowCollectionBehavior behavior = [(*window).nsWindow collectionBehavior];
+        if (enabled)
+            behavior |= NSWindowCollectionBehaviorFullScreenPrimary;
+        else
+            behavior &= ~NSWindowCollectionBehaviorFullScreenPrimary;
+        [(*window).nsWindow setCollectionBehavior:behavior];
+    }
+}
+
+void Window_setUndecorated(Window *window, int mode) {
+    if (!window)
+        return;
+    @autoreleasepool {
+        NSWindowStyleMask mask = styleMaskOf(window);
+        if ((mask & NSWindowStyleMaskFullScreen) != 0)
+            return; // AppKit owns the mask in fullscreen
+
+        NSWindowStyleMask next;
+        if (mode == WINDOW_UNDECORATED_BORDERLESS)
+            next = 0;
+        else if (mode == WINDOW_UNDECORATED_NAKED)
+            next = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                 | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
+                 | NSWindowStyleMaskFullSizeContentView;
+        else
+            next = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                 | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
+
+        [(*window).nsWindow setStyleMask:next];
+
+        bool transparent = (mode == WINDOW_UNDECORATED_NAKED);
+        [(*window).nsWindow setTitlebarAppearsTransparent:transparent];
+        [(*window).nsWindow setTitleVisibility:(transparent ? NSWindowTitleHidden : NSWindowTitleVisible)];
+    }
+}
+
+void Window_setFloatingTrafficLights(Window *window, bool floating) {
+    if (!window) return;
+    @autoreleasepool {
+        if (floating) {
+            updateStyleMask(window, NSWindowStyleMaskFullSizeContentView, 0);
+            [(*window).nsWindow setTitlebarAppearsTransparent:YES];
+            [(*window).nsWindow setTitleVisibility:NSWindowTitleHidden];
+        } else {
+            updateStyleMask(window, 0, NSWindowStyleMaskFullSizeContentView);
+            [(*window).nsWindow setTitlebarAppearsTransparent:NO];
+            [(*window).nsWindow setTitleVisibility:NSWindowTitleVisible];
+        }
+    }
+}
+
+void Window_setOpacity(Window *window, float opacity) {
+    if (!window) return;
+    @autoreleasepool {
+        [(*window).nsWindow setAlphaValue:(CGFloat)opacity];
+    }
+}
+
+void Window_setTransparentBackground(Window *window, bool transparent) {
+    if (!window) return;
+    @autoreleasepool {
+        [(*window).nsWindow setOpaque:!transparent];
+        [(*window).nsWindow setBackgroundColor:(transparent ? [NSColor clearColor] : [NSColor windowBackgroundColor])];
+        if ([(*window).nsWindow contentView].layer) {
+            [(*window).nsWindow contentView].layer.opaque = !transparent;
+        }
+        Window_setTransparent(window, transparent);
+    }
+}
+
+void Window_setBlur(Window *window, float blur) {
+    if (!window) return;
+    @autoreleasepool {
+        NSWindow *nsw = (*window).nsWindow;
+        NSView *contentView = [nsw contentView];
+        
+        // Find existing blur view
+        NSVisualEffectView *blurView = nil;
+        for (NSView *v in [contentView subviews]) {
+            if ([v isKindOfClass:[NSVisualEffectView class]]) {
+                blurView = (NSVisualEffectView*) v;
+                break;
+            }
+        }
+        
+        if (blur > 0.01f) {
+            if (!blurView) {
+                blurView = [[NSVisualEffectView alloc] initWithFrame:[contentView bounds]];
+                [blurView setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
+                [blurView setBlendingMode:NSVisualEffectBlendingModeBehindWindow];
+                [blurView setMaterial:NSVisualEffectMaterialHUDWindow];
+                [blurView setState:NSVisualEffectStateActive];
+                // Add it below everything else
+                [contentView addSubview:blurView positioned:NSWindowBelow relativeTo:nil];
+            }
+            [blurView setAlphaValue:(CGFloat)blur];
+            // Ensure the window and the root Vulkan layer are transparent so the blur shows through
+            [nsw setBackgroundColor:[NSColor clearColor]];
+            [nsw setOpaque:NO];
+            if (contentView.layer) {
+                contentView.layer.opaque = NO;
+            }
+            // CRITICAL: Signal Vulkan to rebuild the swapchain with alpha blending enabled!
+            Window_setTransparent(window, true);
+        } else if (blurView) {
+            [blurView removeFromSuperview];
+            Window_setTransparent(window, false);
+        }
+    }
+}
+
+void Window_setAlwaysOnTop(Window *window, bool onTop) {
+    if (!window) return;
+    @autoreleasepool {
+        [(*window).nsWindow setLevel:(onTop ? NSFloatingWindowLevel : NSNormalWindowLevel)];
+    }
+}
+
+void Window_setClickThrough(Window *window, bool clickThrough) {
+    if (!window) return;
+    @autoreleasepool {
+        [(*window).nsWindow setIgnoresMouseEvents:clickThrough];
+    }
+}
+
+void Window_setShadow(Window *window, bool shadow) {
+    if (!window) return;
+    @autoreleasepool {
+        [(*window).nsWindow setHasShadow:shadow];
+    }
+}
+
+void Window_setMovableByBackground(Window *window, bool movable) {
+    if (!window) return;
+    @autoreleasepool {
+        [(*window).nsWindow setMovableByWindowBackground:movable];
+    }
+}
+
+void Window_minimize(Window *window) {
+    if (!window)
+        return;
+    @autoreleasepool {
+        [(*window).nsWindow miniaturize:nil];
+    }
+}
+
+void Window_restore(Window *window) {
+    if (!window)
+        return;
+    @autoreleasepool {
+        [(*window).nsWindow deminiaturize:nil];
+    }
+}
+
+bool Window_isMinimized(Window *window) {
+    if (!window)
+        return false;
+    @autoreleasepool {
+        return [(*window).nsWindow isMiniaturized];
+    }
+}
+
+bool Window_isFullscreen(Window *window) {
+    if (!window)
+        return false;
+    @autoreleasepool {
+        return (styleMaskOf(window) & NSWindowStyleMaskFullScreen) != 0;
+    }
+}
+
+void Window_setFullscreen(Window *window, bool fullscreen) {
+    if (!window)
+        return;
+    @autoreleasepool {
+        if (fullscreen != Window_isFullscreen(window))
+            [(*window).nsWindow toggleFullScreen:nil];
+    }
+}
+
+void Window_toggleFullscreen(Window *window) {
+    if (!window)
+        return;
+    @autoreleasepool {
+        [(*window).nsWindow toggleFullScreen:nil];
+    }
+}
+
+void Window_setDRM(Window *window, bool enabled) {
+    if (!window)
+        return;
+    @autoreleasepool {
+        // NSWindowSharingNone = 0, NSWindowSharingReadOnly = 1
+        [(*window).nsWindow setSharingType:(enabled ? NSWindowSharingNone : NSWindowSharingReadOnly)];
+    }
+}
+
+void Window_setMinSize(Window *window, int width, int height) {
+    if (!window)
+        return;
+    @autoreleasepool {
+        [(*window).nsWindow setContentMinSize:NSMakeSize((CGFloat)width, (CGFloat)height)];
+    }
+}
+
+void Window_setMaxSize(Window *window, int width, int height) {
+    if (!window)
+        return;
+    @autoreleasepool {
+        [(*window).nsWindow setContentMaxSize:NSMakeSize((CGFloat)width, (CGFloat)height)];
+    }
+}
+
+void Window_setCursorLocked(Window *window, bool locked) {
+    (void) window; // the lock warps in global screen space; any window works
+    if (locked == s_cursorLocked)
+        return;
+
+    if (locked) {
+        // Decouple cursor from motion so deltas arrive without drift between
+        // warp passes; anchor is the current key window's centre in global
+        // (bottom-left origin) screen coordinates.
+        NSWindow *anchor = sLastWindow;
+        NSRect frame = anchor ? [anchor frame] : [[NSScreen mainScreen] frame];
+        s_lockCenter = NSMakePoint(frame.origin.x + frame.size.width / 2.0,
+                                   frame.origin.y + frame.size.height / 2.0);
+        CGAssociateMouseAndMouseCursorPosition(NO);
+        CGWarpMouseCursorPosition(s_lockCenter);
+        CGDisplayHideCursor(kCGDirectMainDisplay);
+        s_cursorLocked = true;
+    } else {
+        s_cursorLocked = false;
+        CGDisplayShowCursor(kCGDirectMainDisplay);
+        CGAssociateMouseAndMouseCursorPosition(YES);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Event wiring. Listeners attach to THIS window's id; dispatch routes events
+// by the window tag they carried when the OS delivered them. Global device
+// taps (Key_addListener etc.) still hear everything, engine-wide.
+// ---------------------------------------------------------------------------
+
+void Window_addKeyAdapter(Window *window, const KeyEvent *adapter) {
+    if (!window) return;
+    Key_attachWindow((*window).id, adapter);
+}
+
+bool Window_removeKeyAdapter(Window *window, const KeyEvent *adapter) {
+    if (!window) return false;
+    return Key_detachWindow((*window).id, adapter);
+}
+
+void Window_addMouseAdapter(Window *window, const MouseEvent *adapter) {
+    if (!window) return;
+    Mouse_attachWindow((*window).id, adapter);
+}
+
+bool Window_removeMouseAdapter(Window *window, const MouseEvent *adapter) {
+    if (!window) return false;
+    return Mouse_detachWindow((*window).id, adapter);
+}
+
+void Window_addTouchAdapter(Window *window, const TouchEvent *adapter) {
+    if (!window) return;
+    Touch_attachWindow((*window).id, adapter);
+}
+
+bool Window_removeTouchAdapter(Window *window, const TouchEvent *adapter) {
+    if (!window) return false;
+    return Touch_detachWindow((*window).id, adapter);
+}
+
+// --- Window-lifecycle adapters (thread 0 registry on the handle) ---
+
+void Window_addWindowAdapter(Window *window, const WindowEvent *adapter) {
+    if (!window || !adapter || (*window).windowAdapterCount >= WINDOW_ADAPTER_MAX)
+        return;
+    (*window).windowAdapters[(*window).windowAdapterCount++] = adapter;
+}
+
+bool Window_removeWindowAdapter(Window *window, const WindowEvent *adapter) {
+    if (!window || !adapter)
+        return false;
+    for (int i = 0; i < (*window).windowAdapterCount; i++) {
+        if ((*window).windowAdapters[i] == adapter) {
+            for (int j = i; j < (*window).windowAdapterCount - 1; j++)
+                (*window).windowAdapters[j] = (*window).windowAdapters[j + 1];
+            (*window).windowAdapterCount--;
+            return true;
+        }
+    }
+    return false;
+}
+
+void Window_dispatchEvents(Window *window) {
+    (void) window; // rings are engine-global; any window handle may drain them
+    Key_dispatchEvents();
+    Mouse_dispatchEvents();
+    Touch_dispatchEvents();
+}
+
+// --- Focus ---
+
+uint32_t Window_id(Window *window) {
+    return window ? (*window).id : FOCUS_BROADCAST;
+}
+
+// Ask the OS to make this the key window (the spotlight).
+void Window_focus(Window *window) {
+    if (!window) return;
+    @autoreleasepool {
+        [[NSRunningApplication currentApplication]
+            activateWithOptions:NSApplicationActivateAllWindows];
+        [(*window).nsWindow makeKeyAndOrderFront:nil];
+        Focus_set((*window).id);
+    }
+}
+
+// Pulls the window to the absolute front of the screen without forcing the 
+// OS to steal keyboard focus from whatever app the user is typing in.
+void Window_bringToFront(Window *window) {
+    if (!window) return;
+    @autoreleasepool {
+        [(*window).nsWindow orderFrontRegardless];
+    }
+}
+
+bool Window_isFocused(Window *window) {
+    return window && Focus_isFocused((*window).id);
+}
+
+void Window_setResizeRenderHook(Window *window, WindowResizeRenderFn fn, void *userdata) {
+    if (!window)
+        return;
+    (*window).resizeRenderFn = fn;
+    (*window).resizeRenderUserdata = userdata;
+}
+
+uint32_t Window_getMonitorId(const Window *window) {
+    return window ? atomic_load_explicit(&(*window).monitorId, memory_order_acquire) : 0;
+}
+
+// --- Resize reflection ---
+
+uint64_t Window_sizeGeneration(Window *window) {
+    if (!window) return 0;
+    return atomic_load_explicit(&(*window).sizeGeneration, memory_order_acquire);
+}
+// --- Software frame presentation ---------------------------------------------
+// Packs the planar RGBA raster into an interleaved RGBX bitmap and stamps it
+// into the content view's layer, aspect-fit. The scratch pack buffer is cached
+// per size: steady-state presents are allocation-free.
+
+bool Window_present(Window *window, const Buffer *frame) {
+    if (!window || !frame)
+        return false;
+    size_t w = Buffer_width(frame);
+    size_t h = Buffer_height(frame);
+    if (w == 0 || h == 0)
+        return false;
+
+    static uint8_t *s_pixels = nullptr;
+    static size_t s_cap = 0;
+    size_t bytes = w * h * 4;
+    if (bytes > s_cap) {
+        uint8_t *grown = (uint8_t*) realloc(s_pixels, bytes);
+        if (!grown)
+            return false;
+        s_pixels = grown;
+        s_cap = bytes;
+    }
+
+    for (size_t y = 0; y < h; y++) {
+        uint8_t *row = s_pixels + y * w * 4;
+        for (size_t x = 0; x < w; x++) {
+            uint8_t r = 0, g = 0, b = 0, a = 0;
+            ColorBuffer_getRGBA(frame, x, y, &r, &g, &b, &a);
+            row[x * 4 + 0] = r;
+            row[x * 4 + 1] = g;
+            row[x * 4 + 2] = b;
+            row[x * 4 + 3] = 255; // opaque present; alpha channel reserved
+        }
+    }
+
+    @autoreleasepool {
+        NSWindow *nsw = (*window).nsWindow;
+        NSView *view = [nsw contentView];
+        [view setWantsLayer:YES];
+
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGContextRef ctx = CGBitmapContextCreate(
+            s_pixels, w, h, 8, w * 4, cs,
+            kCGImageAlphaNoneSkipLast | kCGBitmapByteOrder32Big);
+        if (!ctx) {
+            CGColorSpaceRelease(cs);
+            return false;
+        }
+        CGImageRef img = CGBitmapContextCreateImage(ctx);
+
+        CALayer *layer = view.layer;
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES]; // no implicit fade between frames
+        layer.contents = (__bridge id)img;
+        layer.contentsGravity = kCAGravityResizeAspect;
+        [CATransaction commit];
+
+        CFRelease(img);
+        CFRelease(ctx);
+        CGColorSpaceRelease(cs);
+        return true;
+    }
+}
+
+void *Window_contentView(Window *window) {
+    if (!window || !(*window).nsWindow)
+        return nullptr;
+    return (__bridge void*)[(*window).nsWindow contentView];
+}
+
+@interface AntiVulkanView : NSView
+@end
+@implementation AntiVulkanView
+- (BOOL)isFlipped { return YES; }
+- (NSView*) hitTest:(NSPoint)point { return nil; } // Let events pass through to AntiContentView
+@end
+
+void *Window_metalLayer(Window *window) {
+    if (!window || !(*window).nsWindow)
+        return nullptr;
+    @autoreleasepool {
+        NSView *contentView = [(*window).nsWindow contentView];
+        
+        // Find existing Vulkan view or create it
+        AntiVulkanView *vulkanView = nil;
+        for (NSView *v in [contentView subviews]) {
+            if ([v isKindOfClass:[AntiVulkanView class]]) {
+                vulkanView = (AntiVulkanView*) v;
+                break;
+            }
+        }
+        
+        if (!vulkanView) {
+            vulkanView = [[AntiVulkanView alloc] initWithFrame:contentView.bounds];
+            [vulkanView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+            [contentView addSubview:vulkanView]; // Goes on top of NSVisualEffectView!
+        }
+        
+        [vulkanView setWantsLayer:YES];
+        
+        static CAMetalLayer *s_pinnedLayer = nullptr;
+        if (!s_pinnedLayer) {
+            s_pinnedLayer = [[CAMetalLayer alloc] init];
+            s_pinnedLayer.contentsGravity = kCAGravityTopLeft;
+            s_pinnedLayer.contentsScale = [(*window).nsWindow backingScaleFactor];
+            s_pinnedLayer.opaque = NO;
+            s_pinnedLayer.geometryFlipped = YES;
+        }
+        
+        // Set it as layer-HOSTED, so we own the layer and AppKit won't delete our IOSurface sublayers!
+        vulkanView.layer = s_pinnedLayer;
+        
+        return (__bridge void*) s_pinnedLayer;
+    }
+}
+
+// Assert the layer geometry contract synchronously on thread 0.
+static void applyLayerGravity(Window *window) {
+    if (!window)
+        return;
+    @autoreleasepool {
+        NSView *contentView = [(*window).nsWindow contentView];
+        if (!contentView) return;
+        
+        AntiVulkanView *vulkanView = nil;
+        for (NSView *v in [contentView subviews]) {
+            if ([v isKindOfClass:[AntiVulkanView class]]) {
+                vulkanView = (AntiVulkanView*) v;
+                break;
+            }
+        }
+        
+        if (!vulkanView || !vulkanView.layer)
+            return;
+        
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        vulkanView.layerContentsPlacement = NSViewLayerContentsPlacementTopLeft;
+        vulkanView.layerContentsRedrawPolicy = NSViewLayerContentsRedrawDuringViewResize;
+        vulkanView.layer.contentsGravity = kCAGravityTopLeft;
+        vulkanView.layer.needsDisplayOnBoundsChange = YES;
+        [CATransaction commit];
+    }
+}
+
+void Window_setGravityTopLeft(Window *window) {
+    // Rebuild-moment reassertion: the present worker calls this the instant
+    // a fresh swapchain lands, and the block fires on thread 0 the moment
+    // the runloop can service it — beating the next scheduled pump pass in
+    // the common case. Safety: capture the NSWindow STRONGLY and resolve
+    // the live C handle inside the block, so a window destroyed between
+    // enqueue and execution cannot dangle.
+    if (!window)
+        return;
+    @autoreleasepool {
+        NSWindow *nsw = (*window).nsWindow;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            Window *live = windowHandleOf(nsw);
+            if (live)
+                applyLayerGravity(live);
+        });
+    }
+}
