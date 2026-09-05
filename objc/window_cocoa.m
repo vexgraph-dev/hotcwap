@@ -1352,6 +1352,12 @@ void Window_setUndecorated(Window *window, int mode) {
 
         [(*window).nsWindow setStyleMask:next];
 
+        // setStyleMask: resets the collectionBehavior, which drops the
+        // FullScreenPrimary entitlement set at creation -> green orb dies
+        // (greyed / zoom-only). Re-assert it on every chrome switch so
+        // NAKED keeps native fullscreen. Never touched by teardown.
+        [(*window).nsWindow setCollectionBehavior:([(*window).nsWindow collectionBehavior] | NSWindowCollectionBehaviorFullScreenPrimary)];
+
         bool transparent = (mode == WINDOW_UNDECORATED_NAKED);
         [(*window).nsWindow setTitlebarAppearsTransparent:transparent];
         [(*window).nsWindow setTitleVisibility:(transparent ? NSWindowTitleHidden : NSWindowTitleVisible)];
