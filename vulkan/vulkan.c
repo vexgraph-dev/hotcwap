@@ -24,101 +24,57 @@
 ;;OVERVIEW
 /**
  * ============================================================================
- * MODULE: Vulkan (vulkan/vulkan.c)
- * LEVEL: L4 — Self-Management (runtime-loaded Vulkan chain setup)
- * ============================================================================
- * runtime-loaded Vulkan chain over the compositor model.
- *
- * FUNCTION REGISTRY:
+  * CLASS: Vulkan (vulkan/vulkan.c)
+  * LEVEL: L4 — Self-Management (runtime-loaded Vulkan chain setup)
+  * ============================================================================
+  * runtime-loaded Vulkan chain over the compositor model.
+  *
+  * STRUCT FIELDS (local to this file — exactly this file's class):
+  * ----------------------------------------------------------------------------
+  *   RetiredChain (one retired swapchain generation):
+  *     VkSwapchainKHR chain;                  // retired swapchain (destroyed 3 generations later)
+  *     uint32_t generation;                   // rebuild generation when retired
+  *     uint32_t imageCount;                   // used slots in views[]/fbs[]
+  *     VkImageView views[VK_SWAP_IMAGES_MAX]; // per-image views (die with the chain)
+  *     VkFramebuffer fbs[VK_SWAP_IMAGES_MAX];// per-image framebuffers (die with the chain)
+  *
+  *   Module statics (file-scope, own the chain across frames):
+  *     VkInstance s_instance;                 // loader instance handle
+  *     VkSurfaceKHR s_surface;                // CAMetalLayer-backed surface
+  *     VkPhysicalDevice s_phys;               // chosen physical device
+  *     VkDevice s_device;                     // logical device
+  *     VkQueue s_queue;                       // graphics queue
+  *     VkSwapchainKHR s_swapchain;            // live swapchain
+  *
+  * FUNCTION REGISTRY:
  * ----------------------------------------------------------------------------
  * Constructors:
  *   - Vk_init(window)
  *
- * Core Functions:
- *   - rebuildTargets(void)
- *   - destroyTargets(void)
- *   - buildPipelines(void)
- *   - presentFrameLocked(void)
- *   - ensureDrawablePass(void)
- *   - s_libLoad(void)
- *   - VK_MARK("loader+gpa")
- *   - EnumerateInstanceExtensionProperties_fn(nullptr, &extCount, nullptr)
- *   - for(i++)
- *   - snprintf(names[i], VK_MAX_EXTENSION_NAME_SIZE, "%s", props[i].extensionName)
- *   - fprintf(stderr, %s\n", s_status)
- *   - EnumeratePhysicalDevices_fn(s_instance, &physCount, phys)
- *   - DestroySwapchainKHR_fn(s_device, s_retired[i].chain, nullptr)
- *   - DestroyFramebuffer_fn(s_device, s_retired[i].fbs[v], nullptr)
- *   - DestroyImageView_fn(s_device, s_retired[i].views[v], nullptr)
- *   - DeviceWaitIdle_fn(s_device)
- *   - DestroyRenderPass_fn(s_device, s_drawablePass, nullptr)
- *   - Vk_ready(void)
- *   - Vk_status(void)
- *   - Vk_shutdown(void)
- *   - DestroySurfaceKHR_fn(s_instance, s_surface, nullptr)
- *   - DestroyInstance_fn(s_instance, nullptr)
- *   - dlclose(s_lib)
- *   - loadSpv(path, outSize)
- *   - loadSpvAny(name, outSize)
- *   - fseek(f, 0, SEEK_END)
- *   - fclose(f)
- *   - free(bytes)
- *   - createShaderModule(name, unused)
- *   - Vk_fillRect(cmdBuffer, surfaceW, surfaceH, x, y, w, h, r, g, b, a)
- *   - CmdBindPipeline_fn(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, s_quadPipeline)
- *   - CmdSetViewport_fn(cmdBuffer, 0, 1, &viewport)
- *   - CmdSetScissor_fn(cmdBuffer, 0, 1, &scissor)
- *   - CmdPushConstants_fn(cmdBuffer, s_quadLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, ndc)
- *   - CmdDraw_fn(cmdBuffer, 6, 1, 0, 0)
- *   - dumpAllocStage(width, height)
- *   - BindBufferMemory_fn(s_device, s_dumpBuffer, s_dumpMem, 0)
- *   - dumpRecordCopy(image, cb)
- *   - CmdCopyImageToBuffer_fn(cb, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, s_dumpBuffer, 1, &region)
- *   - dumpWriteFile(void)
- *   - fwrite(hdr, 1, 18, f)
- *   - UnmapMemory_fn(s_device, s_dumpMem)
- *   - DestroyBuffer_fn(s_device, s_dumpBuffer, nullptr)
- *   - FreeMemory_fn(s_device, s_dumpMem, nullptr)
- *   - AllocateCommandBuffers_fn(s_device, &cbai, &s_cmdBuffer)
- *   - Vk_clearPresent(void)
- *   - SpinLock_unlock(&s_presentLock)
- *   - presentFrameTail(imageIndex)
- *   - WaitForFences_fn(s_device, 1, &s_fence, VK_TRUE, 100000000ULL)
- *   - ResetCommandBuffer_fn(s_cmdBuffer, 0)
- *   - BeginCommandBuffer_fn(s_cmdBuffer, &bbi)
- *   - CmdPipelineBarrier_fn(s_cmdBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toPrep)
- *   - CmdClearColorImage_fn(s_cmdBuffer, s_swapchainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &cc.color, 1, &rng)
- *   - CmdBeginRenderPass_fn(s_cmdBuffer, &rbi2, VK_SUBPASS_CONTENTS_INLINE)
- *   - CmdEndRenderPass_fn(s_cmdBuffer)
- *   - EndCommandBuffer_fn(s_cmdBuffer)
- *   - ResetFences_fn(s_device, 1, &s_fence)
- *   - QueueSubmit_fn(s_queue, 1, &si, s_fence)
- *   - Vk_drawTexture(cmdBuffer, surfaceW, surfaceH, x, y, w, h, r, g, b, a, textureId, mode, imgW, imgH)
- *   - VkMac_ensureIOSurfacePass(void)
- *   - CmdBindDescriptorSets_fn(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_texLayout, 0, 1, &bindlessSet, 0, nullptr)
- *   - ensureSdfPipeline(void)
- *   - Vk_drawSDFText(cmdBuffer, surfaceW, surfaceH, x, y, w, h, r, g, b, a, textureId, bold, smoothness, u0, v0, u1, v1)
- *   - Vk_drawColorGlyph(cmdBuffer, surfaceW, surfaceH, x, y, w, h, alpha, textureId, u0, v0, u1, v1)
- *
+  * Core Functions:
+  *   - Vk_shutdown(void)
+  *   - Vk_clearPresent(void)
+  *   - Vk_reloadShaders(void)
+  *   - Vk_fillRect(cmdBuffer, surfaceW, surfaceH, x, y, w, h, r, g, b, a)
+  *   - Vk_drawTexture(cmdBuffer, surfaceW, surfaceH, x, y, w, h, r, g, b, a, textureId, mode, imgW, imgH)
+  *   - Vk_drawSDFText(cmdBuffer, surfaceW, surfaceH, x, y, w, h, r, g, b, a, textureId, bold, smoothness, u0, v0, u1, v1)
+  *   - Vk_drawColorGlyph(cmdBuffer, surfaceW, surfaceH, x, y, w, h, alpha, textureId, u0, v0, u1, v1)
+  *   - rebuildTargets(void)
+  *   - destroyTargets(void)
+  *   - buildPipelines(void)
+  *   - presentFrameLocked(void)
+  *   - ensureDrawablePass(void)
+  *
  * Setters:
  *   - Vk_setPreFrameRenderer(fn, userdata)
  *   - Vk_setFrameRenderer(fn, userdata)
- *   - Vk_setClearColor(r, g, b, a)
- *   - Window_setResizeRenderHook(s_window, VkMac_resizeRenderTrampoline, nullptr)
- *   - Window_setGravityTopLeft(s_window)
- *
- * Getters:
- *   - GetPhysicalDeviceQueueFamilyProperties_fn(s_phys, &familyCount, nullptr)
- *   - GetDeviceQueue_fn(s_device, s_queueFamily, 0, &s_queue)
- *   - GetPhysicalDeviceSurfaceFormatsKHR_fn(s_phys, s_surface, &formatCount, nullptr)
- *   - GetSwapchainImagesKHR_fn(s_device, s_swapchain, &s_swapchainImageCount, nullptr)
- *   - GetBufferMemoryRequirements_fn(s_device, s_dumpBuffer, &req)
- *   - GetPhysicalDeviceMemoryProperties_fn(s_phys, &props)
- *   - VkMac_getIOSurfacePass(void)
- *   - Texture_getDescriptorSetLayout(void)
- *   - Texture_getDescriptorSet(void)
- * ============================================================================
- */
+  *   - Vk_setClearColor(r, g, b, a)
+  *
+  * Getters:
+  *   - Vk_ready(void)
+  *   - Vk_status(void)
+  * ============================================================================
+  */
 
 
 // vulkan/vulkan.c — runtime-loaded Vulkan chain over the compositor model.

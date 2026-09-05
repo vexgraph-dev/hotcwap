@@ -15,9 +15,11 @@
  * MODULE: Vulkan_mac (vulkan/vulkan_mac.c)
  * LEVEL: L4 — Self-Management (MoltenVK loader and surface setup)
  * ============================================================================
- * macOS-specific Vulkan backend functions.
- *
- * FUNCTION REGISTRY:
+  * macOS-specific Vulkan backend functions.
+  *
+  * STRUCT FIELDS: none — procedural/stateless (operates on vulkan.c chain state via Vk_get* accessors)
+  *
+  * FUNCTION REGISTRY:
  * ----------------------------------------------------------------------------
  * Core Functions:
  *   - VkMac_loadLib(void)

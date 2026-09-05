@@ -23,9 +23,11 @@
  * MODULE: Window (window/window.c)
  * LEVEL: L4 — Self-Management (OS window backend persisting across swaps)
  * ============================================================================
- * platform-agnostic window API.
- *
- * FUNCTION REGISTRY:
+  * platform-agnostic window API.
+  *
+  * STRUCT FIELDS: none — stub backend (no Window struct defined here; real fields live in objc/window_cocoa.m)
+  *
+  * FUNCTION REGISTRY:
  * ----------------------------------------------------------------------------
  * Constructors:
  *   - Window_0(void)

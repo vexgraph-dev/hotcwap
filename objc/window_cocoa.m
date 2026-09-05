@@ -37,12 +37,40 @@
 ;;OVERVIEW
 /**
  * ============================================================================
- * MODULE: Window_cocoa (objc/window_cocoa.m)
- * LEVEL: L4 — Self-Management (AppKit OS window shim owned by the OS)
- * ============================================================================
- * the AppKit shim (the ".m" glue file).
- *
- * FUNCTION REGISTRY:
+  * CLASS: Window (objc/window_cocoa.m)
+  * LEVEL: L4 — Self-Management (AppKit OS window shim owned by the OS)
+  * ============================================================================
+  * the AppKit shim (the ".m" glue file).
+  *
+  * STRUCT FIELDS (local to this file — exactly this file's class):
+  * ----------------------------------------------------------------------------
+  *   NSWindow *nsWindow;                      // AppKit window (we own it)
+  *   AntiWindowDelegate *delegate;            // per-window close/focus delegate
+  *   bool shouldClose;                        // true once close requested
+  *   uint32_t id;                             // engine window id (1..7, 0 = broadcast)
+  *   _Atomic uint64_t sizeGeneration;         // resize-reflection counter (thread 0 bumps)
+  *   int cachedWidth;                         // content width at last pump
+  *   int cachedHeight;                        // content height at last pump
+  *   double cachedX;                          // top-left screen X at last pump
+  *   double cachedY;                          // top-left screen Y at last pump
+  *   double cachedContentX;                   // content top-left X (below title bar)
+  *   double cachedContentY;                   // content top-left Y (below title bar)
+  *   _Atomic int presentMode;                 // present pacing (FIFO/IMMEDIATE)
+  *   _Atomic bool transparent;                // composite transparency request
+  *   _Atomic uint64_t renderGeneration;       // policy-reflection counter (swapchain rebuild)
+  *   _Atomic(Panel*) container;               // content root (nullptr = clear-only pass)
+  *   _Atomic(Panel*) contentPanel;            // UI tree (IOSurface-backed when native)
+  *   _Atomic(Panel*) scenePanel;              // scene tree (Vulkan-backed)
+  *   _Atomic(bool) nativeContainer;           // IOSurface backing for content panel
+  *   _Atomic bool enabled;                    // false mutes ALL OS input
+  *   bool lastFocused;                        // focus-flip detection during pump
+  *   _Atomic uint32_t monitorId;              // CGDirectDisplayID mirror (0 = unmapped)
+  *   const WindowEvent *windowAdapters[WINDOW_ADAPTER_MAX]; // lifecycle listeners (max 16)
+  *   int windowAdapterCount;                  // used slots in windowAdapters[]
+  *   WindowResizeRenderFn resizeRenderFn;     // resize-cadence render hook
+  *   void *resizeRenderUserdata;              // hook userdata
+  *
+  * FUNCTION REGISTRY:
  * ----------------------------------------------------------------------------
  * Constructors:
  *   - Window_0(void)
@@ -50,63 +78,45 @@
  *   - Window_new(desc)
  *   - Window_create(title, width, height)
  *
- * Core Functions:
- *   - windowIdAcquire(window, handle)
- *   - for(i++)
- *   - windowIdRelease(id)
- *   - windowIdOf(window)
- *   - windowHandleOf(window)
- *   - windowFireClose(window)
- *   - applyLayerGravity(window)
- *   - Window_compositeIOSurfaceChildren(w, contentPanel)
- *   - windowFireFocus(window, focused)
- *   - windowFireResized(window, width, height)
- *   - windowFireMoved(window, x, y)
- *   - windowFireMonitorChanged(window, oldId, newId)
- *   - resolveMonitorId(window)
- *   - refreshMonitorId(window)
- *   - recenterIfLocked(void)
- *   - CGWarpMouseCursorPosition(s_lockCenter)
- *   - mouseLocation(event, outX, outY)
- *   - touchAction(phase)
- *   - dispatchTouches(event, wid)
- *   - routeEvent(event)
- *   - switch(type)
- *   - Key_pushEvent(wid, stdKey, KEY_ACTION_UP, kTapThresholdNanos)
- *   - Mouse_pushScrollEvent(wid, scrollingDeltaX], scrollingDeltaY])
- *   - Mouse_pushZoomEvent(wid, magnification])
- *   - Mouse_pushButtonEvent(wid, button, KEY_ACTION_DOWN, kTapThresholdNanos)
- *   - Mouse_pushMoveEvent(wid, x, y)
- *   - Mouse_pushMoveDeltaEvent(wid, deltaX], deltaY])
- *   - Mouse_pushDragEvent(wid, button, x, y)
- *   - Window_pollEvents(void)
- *   - windowAlloc(desc)
- *   - descResolve(desc)
- *   - Window_center(w)
- *   - Window_show(w)
- *   - Window_destroy(window)
- *   - free(window)
- *   - Window_shouldClose(window)
- *   - Window_renderGeneration(window)
- *   - Window_forceNativeContainerOnRoot(window, flag)
- *   - Window_attachPanelIOSurface(window, contentPanel, w, h)
- *   - anti_AttachPanelIOSurfaceChildren(, , int, int)
- *   - Window_resizePanelIOSurface(window, panel, width, height)
- *   - anti_ResizePanelIOSurfaceChildren(, , int, int)
- *   - PanelCocoa_fromPanel(panel)
- *   - PanelCocoa_layer(pc)
- *   - styleMaskOf(window)
- *   - updateStyleMask(window, add, clear)
- *   - Window_width(window)
- *   - Window_height(window)
- *   - Window_hide(window)
- *   - Window_minimize(window)
- *   - Window_restore(window)
- *   - Window_toggleFullscreen(window)
- *   - CGAssociateMouseAndMouseCursorPosition(NO)
- *   - CGDisplayHideCursor(kCGDirectMainDisplay)
- *   - CGDisplayShowCursor(kCGDirectMainDisplay)
- *   - Window_addKeyAdapter(window, adapter)
+  * Core Functions:
+  *   - windowIdAcquire(window, handle)
+  *   - windowIdRelease(id)
+  *   - windowIdOf(window)
+  *   - windowHandleOf(window)
+  *   - windowFireClose(window)
+  *   - applyLayerGravity(window)
+  *   - Window_compositeIOSurfaceChildren(w, contentPanel)
+  *   - windowFireFocus(window, focused)
+  *   - windowFireResized(window, width, height)
+  *   - windowFireMoved(window, x, y)
+  *   - windowFireMonitorChanged(window, oldId, newId)
+  *   - resolveMonitorId(window)
+  *   - refreshMonitorId(window)
+  *   - recenterIfLocked(void)
+  *   - mouseLocation(event, outX, outY)
+  *   - touchAction(phase)
+  *   - dispatchTouches(event, wid)
+  *   - routeEvent(event)
+  *   - Window_pollEvents(void)
+  *   - windowAlloc(desc)
+  *   - descResolve(desc)
+  *   - Window_center(w)
+  *   - Window_show(w)
+  *   - Window_destroy(window)
+  *   - Window_shouldClose(window)
+  *   - Window_renderGeneration(window)
+  *   - Window_forceNativeContainerOnRoot(window, flag)
+  *   - Window_attachPanelIOSurface(window, contentPanel, w, h)
+  *   - Window_resizePanelIOSurface(window, panel, width, height)
+  *   - styleMaskOf(window)
+  *   - updateStyleMask(window, add, clear)
+  *   - Window_width(window)
+  *   - Window_height(window)
+  *   - Window_hide(window)
+  *   - Window_minimize(window)
+  *   - Window_restore(window)
+  *   - Window_toggleFullscreen(window)
+  *   - Window_addKeyAdapter(window, adapter)
  *   - Window_removeKeyAdapter(window, adapter)
  *   - Window_addMouseAdapter(window, adapter)
  *   - Window_removeMouseAdapter(window, adapter)
@@ -114,29 +124,22 @@
  *   - Window_removeTouchAdapter(window, adapter)
  *   - Window_addWindowAdapter(window, adapter)
  *   - Window_removeWindowAdapter(window, adapter)
- *   - Window_dispatchEvents(window)
- *   - Key_dispatchEvents()
- *   - Mouse_dispatchEvents()
- *   - Touch_dispatchEvents()
- *   - Window_id(window)
- *   - Window_focus(window)
- *   - Window_bringToFront(window)
- *   - Window_sizeGeneration(window)
- *   - Window_present(window, frame)
- *   - CGColorSpaceRelease(cs)
- *   - CFRelease(img)
- *   - Window_contentView(window)
- *   - Window_metalLayer(window)
- *
- * Setters:
- *   - Window_setLocation(w, d.x, d.y)
- *   - Window_setPresentMode(window, mode)
+  *   - Window_dispatchEvents(window)
+  *   - Window_id(window)
+  *   - Window_focus(window)
+  *   - Window_bringToFront(window)
+  *   - Window_sizeGeneration(window)
+  *   - Window_present(window, frame)
+  *   - Window_contentView(window)
+  *   - Window_metalLayer(window)
+  *
+  * Setters:
+  *   - Window_setPresentMode(window, mode)
  *   - Window_setTransparent(window, transparent)
  *   - Window_setContainer(window, root)
  *   - Window_setContentPanel(window, panel)
- *   - Window_setScenePanel(window, panel)
- *   - PanelCocoa_setAnchors(pc, parentAnchor, selfAnchor)
- *   - Window_setEnabled(window, enabled)
+  *   - Window_setScenePanel(window, panel)
+  *   - Window_setEnabled(window, enabled)
  *   - Window_setTitle(window, title)
  *   - Window_setSize(window, width, height)
  *   - Window_setVisible(window, visible)
@@ -168,13 +171,8 @@
  *   - Window_getContentPanel(window)
  *   - Window_getScenePanel(window)
  *   - Window_isNativeContainerOnRoot(window)
- *   - Window_getPanelLayer(window, panel)
- *   - anti_GetChildCount(contentPanel)
- *   - anti_GetChildAt(contentPanel, index)
- *   - anti_GetChildLayout(child, winW, winH, outX, outY, outW, outH)
- *   - anti_GetChildParentAnchor(child)
- *   - anti_GetChildSelfAnchor(child)
- *   - Window_isEnabled(window)
+  *   - Window_getPanelLayer(window, panel)
+  *   - Window_isEnabled(window)
  *   - hasStyleBit(window, bit)
  *   - Window_getLocation(window, outX, outY)
  *   - Window_getContentOrigin(window, outX, outY)
@@ -184,10 +182,9 @@
  *   - Window_isMinimized(window)
  *   - Window_isFullscreen(window)
  *   - Window_isFocused(window)
- *   - Window_getMonitorId(window)
- *   - ColorBuffer_getRGBA(frame, x, y, &r, &g, &b, &a)
- * ============================================================================
- */
+  *   - Window_getMonitorId(window)
+  * ============================================================================
+  */
 
 
 // Multi-tap window for double-click style counting (legacy parity: 250ms).
