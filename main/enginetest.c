@@ -26,17 +26,19 @@ typedef struct {
 ;;OVERVIEW
 /**
  * ============================================================================
- * MODULE: EngineTest (main/enginetest.c — windowed engine demo)
- * LEVEL: L3 — Module Code (windowed engine demo harness)
- * ============================================================================
- * Showcase for the constructor-idiom Window API: construct hidden, mutate,
- * show, run the fixed-timestep loop until Esc or close. Polls state only —
- * event listeners live with their subsystems (see tests/window_test.c).
- *
- * STRUCT FIELDS (local to this file):
- * ----------------------------------------------------------------------------
- *   EngineTest { window, loop, frames } // Window + loop + frame counter
- *
+  * CLASS: EngineTest (main/enginetest.c — windowed engine demo)
+  * LEVEL: L3 — Module Code (windowed engine demo harness)
+  * ============================================================================
+  * Showcase for the constructor-idiom Window API: construct hidden, mutate,
+  * show, run the fixed-timestep loop until Esc or close. Polls state only —
+  * event listeners live with their subsystems (see tests/window_test.c).
+  *
+  * STRUCT FIELDS (local to this file — exactly this file's class):
+  * ----------------------------------------------------------------------------
+  *   Window *window;                          // demo window (OS-owned handle)
+  *   Loop loop;                               // fixed-timestep loop state
+  *   int frames;                              // presented frame counter
+  *
  * FUNCTION REGISTRY:
  * ----------------------------------------------------------------------------
  * Core Functions:

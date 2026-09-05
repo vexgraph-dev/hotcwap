@@ -32,18 +32,20 @@ typedef struct {
 ;;OVERVIEW
 /**
  * ============================================================================
- * MODULE: WindowTest (tests/window_test.c — Window class _test)
- * LEVEL: L4 — Self-Management (tests L4 window chrome; takes level of what it runs)
- * ============================================================================
- * Two halves: one-shot chrome checks after create (title/size/constraints,
- * resizable toggle, minimize/restore), then a stepped traffic-light tour
- * held ~2s per combination for visible verification. Input listeners echo
- * every key/mouse/scroll/move event the pipeline produces.
- *
- * STRUCT FIELDS (local to this file):
- * ----------------------------------------------------------------------------
- *   win_ctx_t { window, loop, frames } // Window + fixed-timestep loop state
- *
+  * CLASS: win_ctx_t (tests/window_test.c — Window class _test)
+  * LEVEL: L4 — Self-Management (tests L4 window chrome; takes level of what it runs)
+  * ============================================================================
+  * Two halves: one-shot chrome checks after create (title/size/constraints,
+  * resizable toggle, minimize/restore), then a stepped traffic-light tour
+  * held ~2s per combination for visible verification. Input listeners echo
+  * every key/mouse/scroll/move event the pipeline produces.
+  *
+  * STRUCT FIELDS (local to this file — exactly this file's class):
+  * ----------------------------------------------------------------------------
+  *   Window *window;                          // test window (OS-owned handle)
+  *   Loop loop;                               // fixed-timestep loop state
+  *   int frames;                              // pumped frame counter
+  *
  * FUNCTION REGISTRY:
  * ----------------------------------------------------------------------------
  * Core Functions:
