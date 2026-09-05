@@ -103,17 +103,17 @@ static void on_move(void *self, double x, double y) {
         printf("move (%.0f, %.0f)\n", x, y);
 }
 
-static const KeyEvent g_keyListener = {
+static const KeyHandler g_keyListener = {
     .self = nullptr,
     .onKeyDown = on_key_down, .onKeyUp = on_key_up, .onKeyRepeat = nullptr, .onCharTyped = nullptr,
 };
-static const MouseEvent g_mouseListener = {
+static const MouseHandler g_mouseListener = {
     .self = nullptr,
     .onMouseDown = on_mouse_down, .onMouseUp = nullptr, .onMouseRepeat = nullptr,
     .onMouseMove = on_move, .onMouseMoveDelta = nullptr, .onMouseScroll = on_scroll,
     .onMouseDrag = nullptr, .onMouseZoom = nullptr,
 };
-static const TouchEvent g_touchListener = {
+static const TouchHandler g_touchListener = {
     .self = nullptr,
     .onTouchDown = nullptr, .onTouchUp = nullptr, .onTouchMove = nullptr, .onTouchCancel = nullptr,
 };

@@ -1,4 +1,5 @@
 #include "hot/vk_context.h"
+#include "hotcwap-type.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -87,10 +88,10 @@ static const VkModuleManifest s_manifest = {
     .version = "1.0.0",
     .type_id_count = 4,
     .type_ids = {
-        {"ID_VK_SWAPCHAIN", 0x00003E},
-        {"ID_VK_PIPELINE", 0x000044},
-        {"ID_VK_RENDER_PASS", 0x000041},
-        {"ID_VK_FRAMEBUFFER", 0x000049},
+        {"ID_VK_SWAPCHAIN", ID_VK_SWAPCHAIN},
+        {"ID_VK_PIPELINE", ID_VK_PIPELINE},
+        {"ID_VK_RENDER_PASS", ID_VK_RENDER_PASS},
+        {"ID_VK_FRAMEBUFFER", ID_VK_FRAMEBUFFER},
     },
     .export_count = 4,
     .exports = {"vk_begin_frame", "vk_end_frame", "vk_draw_rect", "vk_draw_texture"},

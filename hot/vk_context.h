@@ -99,7 +99,7 @@ typedef struct {
     const char *name;
     const char *version;
     uint32_t type_id_count;
-    struct { const char *name; uint32_t value; } type_ids[256];
+    struct { const char *name; uint64_t value; } type_ids[256];
     uint32_t export_count;
     const char *exports[128];
     uint32_t dependency_count;

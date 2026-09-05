@@ -87,9 +87,9 @@ static const char *parse_string(const char *p, char *out, size_t out_size) {
     return p;
 }
 
-// Parse a JSON number (uint32)
-static const char *parse_uint(const char *p, uint32_t *out) {
-    uint32_t val = 0;
+// Parse a JSON number (uint64)
+static const char *parse_uint(const char *p, uint64_t *out) {
+    uint64_t val = 0;
     while (*p >= '0' && *p <= '9') {
         val = val * 10 + (*p - '0');
         p++;
@@ -99,8 +99,8 @@ static const char *parse_uint(const char *p, uint32_t *out) {
 }
 
 // Parse a hex number (0x...)
-static const char *parse_hex(const char *p, uint32_t *out) {
-    uint32_t val = 0;
+static const char *parse_hex(const char *p, uint64_t *out) {
+    uint64_t val = 0;
     while ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F')) {
         uint8_t nibble;
         if (*p >= '0' && *p <= '9') nibble = *p - '0';
@@ -114,7 +114,7 @@ static const char *parse_hex(const char *p, uint32_t *out) {
 }
 
 // Parse a JSON object value after the key
-static const char *parse_value(const char *p, char *str_out, size_t str_size, uint32_t *num_out, bool *is_hex) {
+static const char *parse_value(const char *p, char *str_out, size_t str_size, uint64_t *num_out, bool *is_hex) {
     p = skip_ws(p);
     if (*p == '"') {
         p = parse_string(p, str_out, str_size);
@@ -210,7 +210,7 @@ bool HotManifest_parse(const char *json, size_t len, HotManifest *out) {
                 if (*p != ':') return false;
                 p++;
                 p = skip_ws(p);
-                uint32_t tval;
+                uint64_t tval;
                 p = parse_value(p, NULL, 0, &tval, &is_hex);
                 tid.value = tval;
                 
@@ -264,7 +264,7 @@ bool HotManifest_parse(const char *json, size_t len, HotManifest *out) {
                 bool is_hex;
                 p = parse_value(p, dummy, sizeof(dummy), NULL, &is_hex);
             } else {
-                uint32_t dummy;
+                uint64_t dummy;
                 bool is_hex;
                 p = parse_value(p, NULL, 0, &dummy, &is_hex);
             }
@@ -284,7 +284,7 @@ bool HotManifest_compatible(const HotManifest *old_manifest, const HotManifest *
     
     // Check that all type_ids in the old manifest exist in the new one with the same value
     for (uint32_t i = 0; i < (*old_manifest).type_id_count; i++) {
-        uint32_t new_val = HotManifest_get_type_id(new_manifest, (*old_manifest).type_ids[i].name);
+        uint64_t new_val = HotManifest_get_type_id(new_manifest, (*old_manifest).type_ids[i].name);
         if (new_val != (*old_manifest).type_ids[i].value) {
             return false;
         }
@@ -293,7 +293,7 @@ bool HotManifest_compatible(const HotManifest *old_manifest, const HotManifest *
     return true;
 }
 
-uint32_t HotManifest_get_type_id(const HotManifest *manifest, const char *name) {
+uint64_t HotManifest_get_type_id(const HotManifest *manifest, const char *name) {
     if (!manifest || !name) return 0;
     
     for (uint32_t i = 0; i < (*manifest).type_id_count; i++) {

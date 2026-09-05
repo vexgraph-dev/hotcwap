@@ -30,7 +30,7 @@
 // A single type ID entry in the manifest.
 typedef struct {
     char name[HOT_MANIFEST_MAX_NAME];   // e.g., "ID_INT"
-    uint32_t value;                      // e.g., 0x00000001
+    uint64_t value;                     // e.g., 0x1'00'0'0'0'00'0000'0001
 } HotTypeId;
 
 // A single function export entry.
@@ -67,6 +67,6 @@ bool HotManifest_parse(const char *json, size_t len, HotManifest *out);
 bool HotManifest_compatible(const HotManifest *old_manifest, const HotManifest *new_manifest);
 
 // Get a type ID by name. Returns 0 if not found.
-uint32_t HotManifest_get_type_id(const HotManifest *manifest, const char *name);
+uint64_t HotManifest_get_type_id(const HotManifest *manifest, const char *name);
 
 #endif

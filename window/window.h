@@ -5,9 +5,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "event/key.h"
-#include "event/mouse.h"
-#include "event/touch.h"
+#include "event/keyhandler.h"
+#include "event/mousehandler.h"
+#include "event/touchhandler.h"
 
 // window/window.h — platform-agnostic window API.
 //
@@ -271,17 +271,17 @@ bool Window_present(Window *window, const Buffer *frame);
 // --- Event wiring (adapters) ---
 //
 // The window is the registration surface for the event contracts: implement
-// a KeyEvent/MouseEvent/TouchEvent vtable (with .self = your object) and
+// a KeyHandler/MouseHandler/TouchHandler vtable (with .self = your object) and
 // attach it here. Every queued event carries the id of the window the OS
 // delivered it to, so an attached adapter only hears events for ITS window
 // (broadcast-tagged synthetic events reach every window). Removal is by
 // pointer identity. Destroying the window detaches its listeners.
-void Window_addKeyAdapter(Window *window, const KeyEvent *adapter);
-bool Window_removeKeyAdapter(Window *window, const KeyEvent *adapter);
-void Window_addMouseAdapter(Window *window, const MouseEvent *adapter);
-bool Window_removeMouseAdapter(Window *window, const MouseEvent *adapter);
-void Window_addTouchAdapter(Window *window, const TouchEvent *adapter);
-bool Window_removeTouchAdapter(Window *window, const TouchEvent *adapter);
+void Window_addKeyAdapter(Window *window, const KeyHandler *adapter);
+bool Window_removeKeyAdapter(Window *window, const KeyHandler *adapter);
+void Window_addMouseAdapter(Window *window, const MouseHandler *adapter);
+bool Window_removeMouseAdapter(Window *window, const MouseHandler *adapter);
+void Window_addTouchAdapter(Window *window, const TouchHandler *adapter);
+bool Window_removeTouchAdapter(Window *window, const TouchHandler *adapter);
 
 // Window-lifecycle adapter: close requests, focus flips, resize/move moves,
 // monitor hand-offs. Fired from the pump pass on thread 0, AFTER the OS

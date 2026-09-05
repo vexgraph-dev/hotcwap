@@ -1571,32 +1571,32 @@ void Window_setCursorLocked(Window *window, bool locked) {
 // taps (Key_addListener etc.) still hear everything, engine-wide.
 // ---------------------------------------------------------------------------
 
-void Window_addKeyAdapter(Window *window, const KeyEvent *adapter) {
+void Window_addKeyAdapter(Window *window, const KeyHandler *adapter) {
     if (!window) return;
     Key_attachWindow((*window).id, adapter);
 }
 
-bool Window_removeKeyAdapter(Window *window, const KeyEvent *adapter) {
+bool Window_removeKeyAdapter(Window *window, const KeyHandler *adapter) {
     if (!window) return false;
     return Key_detachWindow((*window).id, adapter);
 }
 
-void Window_addMouseAdapter(Window *window, const MouseEvent *adapter) {
+void Window_addMouseAdapter(Window *window, const MouseHandler *adapter) {
     if (!window) return;
     Mouse_attachWindow((*window).id, adapter);
 }
 
-bool Window_removeMouseAdapter(Window *window, const MouseEvent *adapter) {
+bool Window_removeMouseAdapter(Window *window, const MouseHandler *adapter) {
     if (!window) return false;
     return Mouse_detachWindow((*window).id, adapter);
 }
 
-void Window_addTouchAdapter(Window *window, const TouchEvent *adapter) {
+void Window_addTouchAdapter(Window *window, const TouchHandler *adapter) {
     if (!window) return;
     Touch_attachWindow((*window).id, adapter);
 }
 
-bool Window_removeTouchAdapter(Window *window, const TouchEvent *adapter) {
+bool Window_removeTouchAdapter(Window *window, const TouchHandler *adapter) {
     if (!window) return false;
     return Touch_detachWindow((*window).id, adapter);
 }
