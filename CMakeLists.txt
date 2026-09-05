@@ -87,8 +87,35 @@ if(NOT TARGET vexspoke)
     endif()
 endif()
 
+# Upstream graphics foundation: the Buffer family lives in graphvex since the
+# move down from vexspoke, so standalone hotcwap needs the same seam here.
+# In-tree the TARGET guard below suffices; the PUBLIC link re-exports
+# graphvex/src so "buffer/..." keeps resolving downstream (Rule 18).
+if(NOT TARGET graphvex)
+    option(HOTCWAP_USE_GRAPHVEX "Depend on graphvex via FetchContent" OFF)
+    if(HOTCWAP_USE_GRAPHVEX)
+        include(FetchContent)
+        if(NOT TARGET vexspoke)
+            FetchContent_Declare(
+                vexspoke
+                GIT_REPOSITORY https://github.com/vexgraph-dev/vexspoke.git
+                GIT_TAG main
+            )
+        endif()
+        FetchContent_Declare(
+            graphvex
+            GIT_REPOSITORY https://github.com/vexgraph-dev/graphvex.git
+            GIT_TAG main
+        )
+        FetchContent_MakeAvailable(vexspoke graphvex)
+    endif()
+endif()
+
 if(TARGET vexspoke)
     target_link_libraries(hotcwap PUBLIC vexspoke)
+endif()
+if(TARGET graphvex)
+    target_link_libraries(hotcwap PUBLIC graphvex)
 endif()
 
 # OS window backend: Cocoa shim on macOS, platform stubs elsewhere.
