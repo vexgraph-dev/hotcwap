@@ -11,29 +11,35 @@
  * MODULE: Vk_module (hot/vk_module.c)
  * LEVEL: L3 — Module Code (reloaded vulkan.dylib business logic)
  * ============================================================================
- * Vulkan module implementation.
- *
- * FUNCTION REGISTRY:
- * ----------------------------------------------------------------------------
- * Core Functions:
- *   - register_trampoline(name, fn)
- *   - for(i++)
- *   - vk_begin_frame(void)
- *   - vk_end_frame(void)
- *   - vk_draw_rect(x, y, w, h, r, g, b, a)
- *   - vk_draw_texture(tex_id, x, y, w, h, mode)
- *   - VkModuleInit(context)
- *   - VkModuleShutdown(void)
- *   - printf(shutdown\n")
- *   - VkModuleGetTrampolines(count)
- *   - VkModuleGetManifest(void)
- *   - VkModuleSaveCache(void)
- *   - VkModuleLoadCache(void)
- *
- * Getters:
- *   - get_trampoline(name)
- * ============================================================================
- */
+  * Vulkan module implementation.
+  *
+  * STRUCT FIELDS (local to this file — module statics, recreated on reload):
+  * ----------------------------------------------------------------------------
+  *   VkPipeline s_pipeline;                   // module-owned pipeline (recreated on reload)
+  *   VkPipelineLayout s_pipeline_layout;      // module-owned layout (recreated on reload)
+  *   VkRenderPass s_render_pass;              // module-owned render pass (recreated on reload)
+  *   VkFramebuffer s_framebuffers[8];         // module-owned framebuffers
+  *   uint32_t s_framebuffer_count;            // used slots in s_framebuffers[]
+  *   VkTrampolineEntry s_trampolines[16];     // export table (name + function per row)
+  *   uint32_t s_trampoline_count;             // used rows in s_trampolines[]
+  *   VkPipelineCache s_cache;                 // pipeline cache (serialized across reloads)
+  *   VkModuleManifest s_manifest;             // module manifest (name, version, ABI)
+  *
+  * FUNCTION REGISTRY:
+  * ----------------------------------------------------------------------------
+  * Core Functions:
+  *   - VkModuleInit(context)
+  *   - VkModuleShutdown(void)
+  *   - VkModuleGetTrampolines(count)
+  *   - VkModuleGetManifest(void)
+  *   - VkModuleSaveCache(void)
+  *   - VkModuleLoadCache(void)
+  *   - vk_begin_frame(void)
+  *   - vk_end_frame(void)
+  *   - vk_draw_rect(x, y, w, h, r, g, b, a)
+  *   - vk_draw_texture(tex_id, x, y, w, h, mode)
+  * ============================================================================
+  */
 
 
 // hot/vk_module.c — Vulkan module implementation.

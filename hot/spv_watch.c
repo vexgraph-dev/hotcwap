@@ -11,13 +11,19 @@
 ;;OVERVIEW
 /**
  * ============================================================================
- * MODULE: Spv_watch (hot/spv_watch.c)
- * LEVEL: L4 — Self-Management (shader change detector driving reload infra)
- * ============================================================================
- * Phase-2 SPV change detector: mtime snapshots over the loadSpvAny
- * precedence chain for the core pipeline shaders.
- *
- * FUNCTION REGISTRY:
+  * CLASS: SpvWatch (hot/spv_watch.c)
+  * LEVEL: L4 — Self-Management (shader change detector driving reload infra)
+  * ============================================================================
+  * Phase-2 SPV change detector: mtime snapshots over the loadSpvAny
+  * precedence chain for the core pipeline shaders.
+  *
+  * STRUCT FIELDS (local to this file — exactly this file's class):
+  * ----------------------------------------------------------------------------
+  *   uint64_t seen[SPV_WATCH_MAX_NAMES];          // mtime+size stamp per shader
+  *   bool have[SPV_WATCH_MAX_NAMES];              // true once baseline snapped
+  *   char resolved[SPV_WATCH_MAX_NAMES][512];     // resolved path per shader
+  *
+  * FUNCTION REGISTRY:
  * ----------------------------------------------------------------------------
  * Constructors:
  *   - SpvWatch_init(void)

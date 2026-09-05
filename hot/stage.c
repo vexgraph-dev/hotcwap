@@ -16,9 +16,11 @@
  * LEVEL: L4 — Self-Management (verify-then-promote staged-update infra)
  * ============================================================================
  * Phase-4 staged updates: verify-then-promote package flow behind the
- * Hot_poll watch dir. Desktop analog of the console signed-package path.
- *
- * FUNCTION REGISTRY:
+  * Hot_poll watch dir. Desktop analog of the console signed-package path.
+  *
+  * STRUCT FIELDS: none — procedural/stateless (operates on HotManifest + stage files)
+  *
+  * FUNCTION REGISTRY:
  * ----------------------------------------------------------------------------
  * Core Functions:
  *   - HotStage_hashFile(path, outHash)

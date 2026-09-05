@@ -11,9 +11,11 @@
  * MODULE: Manifest (hot/manifest.c)
  * LEVEL: L1 — File Metadata (manifest schema other files consume)
  * ============================================================================
- * Module manifest format.
- *
- * FUNCTION REGISTRY:
+  * Module manifest format.
+  *
+  * STRUCT FIELDS: none — procedural/stateless (operates on HotManifest)
+  *
+  * FUNCTION REGISTRY:
  * ----------------------------------------------------------------------------
  * Core Functions:
  *   - HotManifest_parse(json, len, out)

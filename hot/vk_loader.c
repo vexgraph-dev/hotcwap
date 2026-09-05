@@ -10,37 +10,43 @@
 ;;OVERVIEW
 /**
  * ============================================================================
- * MODULE: Vk_loader (hot/vk_loader.c)
- * LEVEL: L4 — Self-Management (owns VkDevice; loader machinery surviving reload)
- * ============================================================================
- * VkDevice owner and Vulkan module loader.
- *
- * FUNCTION REGISTRY:
- * ----------------------------------------------------------------------------
- * Constructors:
- *   - trampoline_create(name)
- *
- * Core Functions:
- *   - trampoline_find(name)
- *   - for(i++)
- *   - strncpy(s_trampolines[idx].name, name, 63)
- *   - atomic_store(&s_trampolines[idx].ptr, NULL)
- *   - volatile("yield")
- *   - vk_retire_handle(handle)
- *   - dlclose(s_vk_retired[i].handle)
- *   - vk_advance_generation(void)
- *   - hot_vk_init_loader(instance, phys, device, queue, queue_family)
- *   - vkCreatePipelineCache(s_device, &cache_ci, NULL, &s_cache)
- *   - hot_vk_load_module(path)
- *   - fprintf(stderr, exports\n")
- *   - hot_vk_shutdown(void)
- *   - vkDestroyPipelineCache(s_device, s_cache, NULL)
- *   - printf(shutdown\n")
- *
- * Getters:
- *   - hot_vk_get_symbol(name)
- * ============================================================================
- */
+  * CLASS: VkLoader (hot/vk_loader.c)
+  * LEVEL: L4 — Self-Management (owns VkDevice; loader machinery surviving reload)
+  * ============================================================================
+  * VkDevice owner and Vulkan module loader.
+  *
+  * STRUCT FIELDS (local to this file — exactly this file's class):
+  * ----------------------------------------------------------------------------
+  *   Trampoline (one row per exported symbol):
+  *     _Atomic(void*) ptr;                    // current generation target
+  *     _Atomic(void*) fallback_ptr;           // prior generation (mid-swap cover)
+  *     char name[64];                         // export symbol name
+  *
+  *   VkRetiredHandle (one parked dylib):
+  *     void *handle;                          // retired dylib (NULL = free slot)
+  *     uint32_t generation;                   // reload generation when retired
+  *
+  *   Module statics (file-scope, own the device across reloads):
+  *     VkInstance s_instance;                 // loader-owned instance
+  *     VkPhysicalDevice s_phys;               // loader-owned physical device
+  *     VkDevice s_device;                     // loader-owned device (survives reload)
+  *     VkQueue s_queue;                       // loader-owned queue
+  *     uint32_t s_queue_family;               // queue family index
+  *     VkPipelineCache s_cache;               // pipeline cache handle
+  *
+  * FUNCTION REGISTRY:
+  * ----------------------------------------------------------------------------
+  * Core Functions:
+  *   - hot_vk_init_loader(instance, phys, device, queue, queue_family)
+  *   - hot_vk_load_module(path)
+  *   - hot_vk_shutdown(void)
+  *   - vk_retire_handle(handle)
+  *   - vk_advance_generation(void)
+  *
+  * Getters:
+  *   - hot_vk_get_symbol(name)
+  * ============================================================================
+  */
 
 
 // hot/vk_loader.c — VkDevice owner and Vulkan module loader.

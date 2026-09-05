@@ -25,9 +25,11 @@
  *   v2 (1.1.0): [phaseBias f32][modeShadow i32][glowStrength f32] = 12 bytes
  * Hot_migrate carries v1 -> v2 forward (glow defaults to 1.0). The loader
  * calls it when the saved blob predates the new module; same-version
- * swaps take the direct Hot_save/Hot_restore path.
- *
- * FUNCTION REGISTRY:
+  * swaps take the direct Hot_save/Hot_restore path.
+  *
+  * STRUCT FIELDS: none — procedural/stateless (operates on HotModule via Hot_* module exports)
+  *
+  * FUNCTION REGISTRY:
  * ----------------------------------------------------------------------------
  * Constructors:
  *   - Hot_init_module(void)
