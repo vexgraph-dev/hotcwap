@@ -69,6 +69,7 @@
   *   int windowAdapterCount;                  // used slots in windowAdapters[]
   *   WindowResizeRenderFn resizeRenderFn;     // resize-cadence render hook
   *   void *resizeRenderUserdata;              // hook userdata
+  *   WindowCursorType cursorType;             // active OS cursor style
   *
   * FUNCTION REGISTRY:
  * ----------------------------------------------------------------------------
@@ -124,22 +125,22 @@
  *   - Window_removeTouchAdapter(window, adapter)
  *   - Window_addWindowAdapter(window, adapter)
  *   - Window_removeWindowAdapter(window, adapter)
-  *   - Window_dispatchEvents(window)
-  *   - Window_id(window)
-  *   - Window_focus(window)
-  *   - Window_bringToFront(window)
-  *   - Window_sizeGeneration(window)
-  *   - Window_present(window, frame)
-  *   - Window_contentView(window)
-  *   - Window_metalLayer(window)
-  *
-  * Setters:
-  *   - Window_setPresentMode(window, mode)
+ *   - Window_dispatchEvents(window)
+ *   - Window_id(window)
+ *   - Window_focus(window)
+ *   - Window_bringToFront(window)
+ *   - Window_sizeGeneration(window)
+ *   - Window_present(window, frame)
+ *   - Window_contentView(window)
+ *   - Window_metalLayer(window)
+ *
+ * Setters:
+ *   - Window_setPresentMode(window, mode)
  *   - Window_setTransparent(window, transparent)
  *   - Window_setContainer(window, root)
  *   - Window_setContentPanel(window, panel)
-  *   - Window_setScenePanel(window, panel)
-  *   - Window_setEnabled(window, enabled)
+ *   - Window_setScenePanel(window, panel)
+ *   - Window_setEnabled(window, enabled)
  *   - Window_setTitle(window, title)
  *   - Window_setSize(window, width, height)
  *   - Window_setVisible(window, visible)
@@ -161,6 +162,7 @@
  *   - Window_setMinSize(window, width, height)
  *   - Window_setMaxSize(window, width, height)
  *   - Window_setCursorLocked(window, locked)
+ *   - Window_setCursorType(window, type)
  *   - Window_setResizeRenderHook(window, fn, userdata)
  *   - Window_setGravityTopLeft(window)
  *
@@ -183,6 +185,7 @@
  *   - Window_isFullscreen(window)
  *   - Window_isFocused(window)
   *   - Window_getMonitorId(window)
+  *   - Window_getCursorType(window)
   * ============================================================================
   */
 
@@ -286,6 +289,9 @@ struct Window {
     // --- resize-cadence render bridge (c -> objc -> c) ---
     WindowResizeRenderFn resizeRenderFn;
     void *resizeRenderUserdata;
+
+    // --- cursor styling ---
+    WindowCursorType cursorType;
 };
 
 // Window id registry: slot i holds the NSWindow currently owning id i (and
@@ -442,6 +448,9 @@ static void applyLayerGravity(Window *window);
 
 static AntiAppDelegate *sAppDelegate = nil; // one app delegate for the whole process
 static NSWindow *sLastWindow = nil;
+// Key-window claim pending: set by Window_show/Window_focus, drained by the
+// pump (Window_pollEvents) once the app is active and the claim sticks.
+static NSWindow *sPendingKeyWindow = nil;
 
 // Window-lifecycle adapter fan-out. All fire from thread 0 only.
 static void windowFireClose(Window *window) {
@@ -701,6 +710,19 @@ void Window_pollEvents(void) {
         [NSApp updateWindows];
         recenterIfLocked();
         Focus_set(windowIdOf([NSApp keyWindow]));
+        // Drain a pending key claim: if activation was denied outright the
+        // synchronous claim in claimKeyAfterActivation was a no-op. Once the
+        // app is active, re-assert until AppKit grants key; the claim then
+        // sticks with no hover/refocus needed.
+        if (sPendingKeyWindow) {
+            if ([NSApp keyWindow] == sPendingKeyWindow) {
+                sPendingKeyWindow = nil;
+            } else if ([NSApp isActive] && [sPendingKeyWindow canBecomeKeyWindow]) {
+                [sPendingKeyWindow makeKeyWindow];
+                if ([NSApp keyWindow] == sPendingKeyWindow)
+                    sPendingKeyWindow = nil;
+            }
+        }
 
         // Resize + move reflection: compare the live frame against the cache
         // and bump the generation / fire adapters only on an actual change,
@@ -933,6 +955,8 @@ Window *Window_create(const char *title, int width, int height) {
 void Window_destroy(Window *window) {
     if (!window) return;
     @autoreleasepool {
+        if (sPendingKeyWindow == (*window).nsWindow)
+            sPendingKeyWindow = nil;
         [(*window).nsWindow setDelegate:nil];   // detach: no callbacks into freed struct
         if (!(*window).shouldClose) {
             [(*window).nsWindow close];
@@ -1252,15 +1276,46 @@ void Window_center(Window *window) {
     }
 }
 
+// Claim key synchronously: activation is async, so spin the runloop briefly
+// until [NSApp isActive] commits, then take key while the grant is hot.
+// Falls back to the pump's sPendingKeyWindow re-assertion if activation is
+// denied outright (another app forced foreground) — the claim then sticks
+// the moment the user clicks us, with no extra code.
+static void claimKeyAfterActivation(NSWindow *nsw) {
+    if (!nsw)
+        return;
+    [nsw orderFront:nil];
+    [[NSRunningApplication currentApplication]
+        activateWithOptions:NSApplicationActivateAllWindows];
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:0.5];
+    while (![NSApp isActive] &&
+           [[NSDate date] compare:deadline] == NSOrderedAscending) {
+        NSEvent *e = [NSApp nextEventMatchingMask:NSEventMaskAny
+                                        untilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]
+                                           inMode:NSDefaultRunLoopMode
+                                          dequeue:YES];
+        if (e)
+            [NSApp sendEvent:e];
+        [NSApp updateWindows];
+    }
+    if ([nsw canBecomeKeyWindow])
+        [nsw makeKeyWindow];
+    // If activation never committed the makeKey above is a no-op; the pump
+    // re-asserts it once [NSApp isActive] until it sticks.
+    sPendingKeyWindow = nsw;
+}
+
 void Window_show(Window *window) {
     if (!window)
         return;
     @autoreleasepool {
-        // Modern activation: activateIgnoringOtherApps: is deprecated and
-        // unreliable on recent macOS (leaves traffic lights greyed).
-        [[NSRunningApplication currentApplication]
-            activateWithOptions:NSApplicationActivateAllWindows];
-        [(*window).nsWindow makeKeyAndOrderFront:nil];
+        // Show-then-focus, synchronously: visible first, activation commits
+        // inside claimKey (brief runloop spin), key claimed while hot — so
+        // open == focused, with colored traffic lights, no hover needed.
+        // Order matters: the old fire-and-forget activate + makeKeyAndOrderFront
+        // ran the key claim while the app was still inactive and AppKit
+        // silently dropped it (grey lights until manual refocus).
+        claimKeyAfterActivation((*window).nsWindow);
         // Prime the monitor mirror eagerly: a window that just became
         // visible should know where it lives before the first pump.
         refreshMonitorId(window);
@@ -1271,6 +1326,8 @@ void Window_hide(Window *window) {
     if (!window)
         return;
     @autoreleasepool {
+        if (sPendingKeyWindow == (*window).nsWindow)
+            sPendingKeyWindow = nil;
         [(*window).nsWindow orderOut:nil];
     }
 }
@@ -1565,6 +1622,49 @@ void Window_setCursorLocked(Window *window, bool locked) {
     }
 }
 
+void Window_setCursorType(Window *window, WindowCursorType type) {
+    if (!window) return;
+    WindowCursorType prev = (*window).cursorType;
+    (*window).cursorType = type;
+    @autoreleasepool {
+        if (prev == WINDOW_CURSOR_HIDDEN && type != WINDOW_CURSOR_HIDDEN) {
+            [NSCursor unhide];
+        }
+        switch (type) {
+            case WINDOW_CURSOR_IBEAM:
+                [[NSCursor IBeamCursor] set];
+                break;
+            case WINDOW_CURSOR_POINTING_HAND:
+                [[NSCursor pointingHandCursor] set];
+                break;
+            case WINDOW_CURSOR_CROSSHAIR:
+                [[NSCursor crosshairCursor] set];
+                break;
+            case WINDOW_CURSOR_RESIZE_EW:
+                [[NSCursor resizeLeftRightCursor] set];
+                break;
+            case WINDOW_CURSOR_RESIZE_NS:
+                [[NSCursor resizeUpDownCursor] set];
+                break;
+            case WINDOW_CURSOR_NOT_ALLOWED:
+                [[NSCursor operationNotAllowedCursor] set];
+                break;
+            case WINDOW_CURSOR_HIDDEN:
+                [NSCursor hide];
+                break;
+            case WINDOW_CURSOR_DEFAULT:
+            default:
+                [[NSCursor arrowCursor] set];
+                break;
+        }
+    }
+}
+
+WindowCursorType Window_getCursorType(const Window *window) {
+    if (!window) return WINDOW_CURSOR_DEFAULT;
+    return (*window).cursorType;
+}
+
 // ---------------------------------------------------------------------------
 // Event wiring. Listeners attach to THIS window's id; dispatch routes events
 // by the window tag they carried when the OS delivered them. Global device
@@ -1640,9 +1740,7 @@ uint32_t Window_id(Window *window) {
 void Window_focus(Window *window) {
     if (!window) return;
     @autoreleasepool {
-        [[NSRunningApplication currentApplication]
-            activateWithOptions:NSApplicationActivateAllWindows];
-        [(*window).nsWindow makeKeyAndOrderFront:nil];
+        claimKeyAfterActivation((*window).nsWindow);
         Focus_set((*window).id);
     }
 }

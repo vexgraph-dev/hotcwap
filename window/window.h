@@ -246,6 +246,21 @@ void Window_setDRM(Window *window, bool enabled);
 void Window_setMinSize(Window *window, int width, int height);
 void Window_setMaxSize(Window *window, int width, int height);
 
+// --- Cursor control ---
+typedef enum WindowCursorType {
+    WINDOW_CURSOR_DEFAULT       = 0,
+    WINDOW_CURSOR_IBEAM         = 1,
+    WINDOW_CURSOR_POINTING_HAND = 2,
+    WINDOW_CURSOR_CROSSHAIR     = 3,
+    WINDOW_CURSOR_RESIZE_EW     = 4,
+    WINDOW_CURSOR_RESIZE_NS     = 5,
+    WINDOW_CURSOR_NOT_ALLOWED   = 6,
+    WINDOW_CURSOR_HIDDEN        = 7,
+} WindowCursorType;
+
+void Window_setCursorType(Window *window, WindowCursorType type);
+WindowCursorType Window_getCursorType(const Window *window);
+
 // FPS-style relative cursor: hides the pointer, decouples it from movement,
 // and re-warps to the window centre each pump pass while deltas flow into the
 // input/mouse stream as move-delta events. (Legacy: macOSWindow.setCursorLock.)

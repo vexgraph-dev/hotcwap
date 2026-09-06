@@ -99,6 +99,7 @@
  *   - Window_setMinSize(window, width, height)
  *   - Window_setMaxSize(window, width, height)
  *   - Window_setCursorLocked(window, locked)
+ *   - Window_setCursorType(window, type)
  *   - Window_setGravityTopLeft(window)
  *   - Window_setResizeRenderHook(window, fn, userdata)
  *
@@ -119,6 +120,7 @@
  *   - Window_isFullscreen(window)
  *   - Window_isFocused(window)
  *   - Window_getMonitorId(window)
+ *   - Window_getCursorType(window)
  * ============================================================================
  */
 
@@ -353,6 +355,18 @@ void Window_setMaxSize(Window *window, int width, int height) {
     (void) window;
     (void) width;
     (void) height;
+}
+
+;;INCOMPLETE // SetCursor; no-op until implemented.
+void Window_setCursorType(Window *window, WindowCursorType type) {
+    (void) window;
+    (void) type;
+}
+
+;;INCOMPLETE // GetCursor; returns default until implemented.
+WindowCursorType Window_getCursorType(const Window *window) {
+    (void) window;
+    return WINDOW_CURSOR_DEFAULT;
 }
 
 #endif
