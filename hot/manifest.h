@@ -30,7 +30,7 @@
 // A single type ID entry in the manifest.
 typedef struct {
     char name[HOT_MANIFEST_MAX_NAME];   // e.g., "ID_INT"
-    uint64_t value;                     // e.g., 0x1'00'0'0'0'00'0000'0001
+    uint64_t value;                     // e.g., 0x1'00'0'0'0'00'00000001
 } HotTypeId;
 
 // A single function export entry.
