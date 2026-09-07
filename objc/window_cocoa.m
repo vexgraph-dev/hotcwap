@@ -18,6 +18,7 @@
 #import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
 #import <QuartzCore/QuartzCore.h>
+#import <Metal/Metal.h>
 #import <stdatomic.h>
 
 #include "buffer/color_buffer.h"
@@ -1103,8 +1104,10 @@ void Window_compositeIOSurfaceChildren(Window *window, Panel *contentPanel) {
     if (!window || !contentPanel) return;
     
     // CoreAnimation strictly requires layer tree mutations to occur on the main thread.
-    // If the Vulkan background worker calls this, it must be asynchronously dispatched.
-    dispatch_async(dispatch_get_main_queue(), ^{
+    // If the Vulkan background worker calls this, it must be asynchronously dispatched,
+    // but if we're already on the main thread (e.g. during live resize tracking), we must
+    // execute it synchronously to prevent CALayers from lagging one frame behind.
+    dispatch_block_t block = ^{
         NSWindow *nsWindow = (*window).nsWindow;
         if (!nsWindow) return;
         NSView *contentView = [nsWindow contentView];
@@ -1167,7 +1170,13 @@ void Window_compositeIOSurfaceChildren(Window *window, Panel *contentPanel) {
             }
         }
         [CATransaction commit];
-    });
+    };
+
+    if ([NSThread isMainThread]) {
+        block();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), block);
+    }
 }
 
 // --- Runtime state -------------------------------------------------------------
@@ -1848,9 +1857,75 @@ void *Window_contentView(Window *window) {
 
 @interface AntiVulkanView : NSView
 @end
+
 @implementation AntiVulkanView
-- (BOOL)isFlipped { return YES; }
-- (NSView*) hitTest:(NSPoint)point { return nil; } // Let events pass through to AntiContentView
+- (BOOL)isFlipped {
+    return YES;
+}
+
+- (NSView*)hitTest:(NSPoint)point {
+    (void) point;
+    return nil; // Let events pass through to AntiContentView
+}
+
+- (CALayer*)makeBackingLayer {
+    CAMetalLayer *layer = [CAMetalLayer layer];
+    layer.contentsGravity = kCAGravityTopLeft;
+    layer.geometryFlipped = YES;
+    layer.opaque = NO;
+    layer.presentsWithTransaction = YES;
+    layer.device = MTLCreateSystemDefaultDevice();
+    CGFloat scale = [self window] ? [[self window] backingScaleFactor] : 1.0;
+    if (scale <= 0.0)
+        scale = 1.0;
+    layer.contentsScale = scale;
+    return layer;
+}
+
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    NSWindow *w = [self window];
+    if (w) {
+        CGFloat scale = [w backingScaleFactor];
+        if (scale > 0.0 && [[self layer] isKindOfClass:[CAMetalLayer class]]) {
+            [self layer].contentsScale = scale;
+        }
+    }
+}
+
+- (void)setFrameSize:(NSSize)newSize {
+    [super setFrameSize:newSize];
+    Window *w = windowHandleOf([self window]);
+    if (!w)
+        return;
+
+    CGFloat scale = [self window] ? [[self window] backingScaleFactor] : 1.0;
+    if (scale <= 0.0)
+        scale = 1.0;
+    uint32_t pxW = (uint32_t) (newSize.width * scale + 0.5);
+    uint32_t pxH = (uint32_t) (newSize.height * scale + 0.5);
+    if (pxW == 0 || pxH == 0)
+        return;
+
+    if ([[self layer] isKindOfClass:[CAMetalLayer class]]) {
+        CAMetalLayer *metal = (CAMetalLayer*) [self layer];
+        metal.drawableSize = CGSizeMake((CGFloat) pxW, (CGFloat) pxH);
+    }
+
+    (*w).cachedWidth = (int) newSize.width;
+    (*w).cachedHeight = (int) newSize.height;
+
+    // Synchronously resolve 9-part anchors and layer layout for all IOSurface children
+    if (atomic_load_explicit(&(*w).nativeContainer, memory_order_acquire)) {
+        Panel *contentPanel = atomic_load_explicit(&(*w).contentPanel, memory_order_acquire);
+        if (contentPanel)
+            Window_compositeIOSurfaceChildren(w, contentPanel);
+    }
+
+    // Fire resize render hook synchronously inside this layout turn
+    if ((*w).resizeRenderFn)
+        (*w).resizeRenderFn((*w).resizeRenderUserdata);
+}
 @end
 
 void *Window_metalLayer(Window *window) {
@@ -1870,25 +1945,12 @@ void *Window_metalLayer(Window *window) {
         
         if (!vulkanView) {
             vulkanView = [[AntiVulkanView alloc] initWithFrame:contentView.bounds];
-            [vulkanView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+            [vulkanView setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
+            [vulkanView setWantsLayer:YES];
             [contentView addSubview:vulkanView]; // Goes on top of NSVisualEffectView!
         }
         
-        [vulkanView setWantsLayer:YES];
-        
-        static CAMetalLayer *s_pinnedLayer = nullptr;
-        if (!s_pinnedLayer) {
-            s_pinnedLayer = [[CAMetalLayer alloc] init];
-            s_pinnedLayer.contentsGravity = kCAGravityTopLeft;
-            s_pinnedLayer.contentsScale = [(*window).nsWindow backingScaleFactor];
-            s_pinnedLayer.opaque = NO;
-            s_pinnedLayer.geometryFlipped = YES;
-        }
-        
-        // Set it as layer-HOSTED, so we own the layer and AppKit won't delete our IOSurface sublayers!
-        vulkanView.layer = s_pinnedLayer;
-        
-        return (__bridge void*) s_pinnedLayer;
+        return (__bridge void*) [vulkanView layer];
     }
 }
 

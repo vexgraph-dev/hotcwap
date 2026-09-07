@@ -2,6 +2,7 @@
 #define VK_USE_PLATFORM_METAL_EXT
 
 #include "vulkan/vulkan_mac.h"
+#include "vulkan/vk.h"
 #include "window/window.h"
 #include <vulkan/vulkan_core.h>
 #include <dlfcn.h>
@@ -165,7 +166,8 @@ VkRenderPass VkMac_getIOSurfacePass(void) {
     return s_iosurfacePass;
 }
 
-// Resize render trampoline (no-op on macOS; Vulkan has its own worker thread).
+// Resize render trampoline: attempts a synchronized present on thread 0 during OS resize.
 void VkMac_resizeRenderTrampoline(void *userdata) {
-    (void)userdata;
+    (void) userdata;
+    Vk_clearPresent();
 }
