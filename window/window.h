@@ -132,36 +132,26 @@ void Window_setVisible(Window *window, bool visible);
 // Setting nullptr detaches content and the renderer falls back to a clear-only
 // pass — nothing is displayed. The renderer re-reads this pointer every frame
 // (relaxed atomic), so swaps land on the next presented frame.
-//
-// NEW: two slots for the IOSurface split:
-//   - contentPanel: the UI tree (IOSurface-backed when native)
-//   - scenePanel: the scene tree (Vulkan-backed)
-// When forceNativeContainerOnRoot(true), the contentPanel gets IOSurface
-// backing and AppKit composites it; the scenePanel renders via Vulkan.
+// Two-layer split architecture:
+//   - contentPanel: the UI tree (native IOSurface-backed CALayers composited by AppKit)
+//   - scenePanel: the scene tree (Vulkan swapchain-backed)
 
 void   Window_setContainer(Window *window, Panel *root);
 Panel *Window_getContainer(const Window *window);
 
-// Set the content panel (the UI tree). When forceNativeContainerOnRoot(true),
-// this panel gets IOSurface backing for native AppKit compositing.
+// Set the content panel (the UI tree, composited natively via CALayers).
 void   Window_setContentPanel(Window *window, Panel *panel);
 Panel *Window_getContentPanel(const Window *window);
 
-// Set the scene panel (the Vulkan-rendered scene tree).
+// Set the scene panel (the Vulkan-rendered scene tree stamped on the swapchain).
 void   Window_setScenePanel(Window *window, Panel *panel);
 Panel *Window_getScenePanel(const Window *window);
 
-// Toggle native IOSurface backing for the content panel root. When true,
-// the content panel is rendered via IOSurface+AppKit instead of Vulkan.
-// Call BEFORE setting the content panel so the backing is attached.
-void Window_forceNativeContainerOnRoot(Window *window, bool flag);
-bool Window_isNativeContainerOnRoot(const Window *window);
-
 // --- IOSurface panel bridge (C callable from renderer) ------------------------
 //
-// When nativeContainer is true, the content panel gets IOSurface backing and
-// AppKit composites it via CALayer. These functions let the renderer attach,
-// resize, render, and get the CALayer for IOSurface-backed panels. Thread 0 only.
+// The content panel children get IOSurface backing and AppKit composites them
+// via CALayers. These functions let the renderer attach, resize, render, and
+// position the CALayers for IOSurface-backed panels. Thread 0 only.
 
 bool Window_attachPanelIOSurface(Window *window, Panel *panel, int width, int height);
 bool Window_resizePanelIOSurface(Window *window, Panel *panel, int width, int height);

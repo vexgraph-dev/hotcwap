@@ -62,7 +62,6 @@
   *   _Atomic(Panel*) container;               // content root (nullptr = clear-only pass)
   *   _Atomic(Panel*) contentPanel;            // UI tree (IOSurface-backed when native)
   *   _Atomic(Panel*) scenePanel;              // scene tree (Vulkan-backed)
-  *   _Atomic(bool) nativeContainer;           // IOSurface backing for content panel
   *   _Atomic bool enabled;                    // false mutes ALL OS input
   *   bool lastFocused;                        // focus-flip detection during pump
   *   _Atomic uint32_t monitorId;              // CGDirectDisplayID mirror (0 = unmapped)
@@ -107,7 +106,6 @@
   *   - Window_destroy(window)
   *   - Window_shouldClose(window)
   *   - Window_renderGeneration(window)
-  *   - Window_forceNativeContainerOnRoot(window, flag)
   *   - Window_attachPanelIOSurface(window, contentPanel, w, h)
   *   - Window_resizePanelIOSurface(window, panel, width, height)
   *   - styleMaskOf(window)
@@ -173,7 +171,6 @@
  *   - Window_getContainer(window)
  *   - Window_getContentPanel(window)
  *   - Window_getScenePanel(window)
- *   - Window_isNativeContainerOnRoot(window)
   *   - Window_getPanelLayer(window, panel)
   *   - Window_isEnabled(window)
  *   - hasStyleBit(window, bit)
@@ -274,9 +271,8 @@ struct Window {
 
     // --- content root: nullptr => clear-only pass --
     _Atomic(Panel*) container;
-    _Atomic(Panel*) contentPanel;  // UI tree (IOSurface-backed when native)
+    _Atomic(Panel*) contentPanel;  // UI tree (native IOSurface-backed CALayers)
     _Atomic(Panel*) scenePanel;    // Scene tree (Vulkan-backed)
-    _Atomic(bool) nativeContainer;  // IOSurface backing for content panel
 
     // --- runtime state --
     _Atomic bool enabled;    // false mutes ALL OS input for this window
@@ -416,11 +412,9 @@ static void applyLayerGravity(Window *window);
         NSRect content = [(*w).nsWindow contentRectForFrameRect:NSMakeRect(0, 0, frameSize.width, frameSize.height)];
         (*w).cachedWidth = (int)content.size.width;
         (*w).cachedHeight = (int)content.size.height;
-        if (atomic_load_explicit(&(*w).nativeContainer, memory_order_acquire)) {
-            Panel *contentPanel = atomic_load_explicit(&(*w).contentPanel, memory_order_acquire);
-            if (contentPanel) {
-                Window_compositeIOSurfaceChildren(w, contentPanel);
-            }
+        Panel *contentPanel = atomic_load_explicit(&(*w).contentPanel, memory_order_acquire);
+        if (contentPanel) {
+            Window_compositeIOSurfaceChildren(w, contentPanel);
         }
         if ((*w).resizeRenderFn)
             (*w).resizeRenderFn((*w).resizeRenderUserdata);
@@ -435,11 +429,9 @@ static void applyLayerGravity(Window *window);
         NSRect content = [(*w).nsWindow contentRectForFrameRect:[(*w).nsWindow frame]];
         (*w).cachedWidth = (int)content.size.width;
         (*w).cachedHeight = (int)content.size.height;
-        if (atomic_load_explicit(&(*w).nativeContainer, memory_order_acquire)) {
-            Panel *contentPanel = atomic_load_explicit(&(*w).contentPanel, memory_order_acquire);
-            if (contentPanel) {
-                Window_compositeIOSurfaceChildren(w, contentPanel);
-            }
+        Panel *contentPanel = atomic_load_explicit(&(*w).contentPanel, memory_order_acquire);
+        if (contentPanel) {
+            Window_compositeIOSurfaceChildren(w, contentPanel);
         }
         if ((*w).resizeRenderFn)
             (*w).resizeRenderFn((*w).resizeRenderUserdata);
@@ -788,11 +780,9 @@ void Window_pollEvents(void) {
                 (*(*handle).resizeRenderFn)((*handle).resizeRenderUserdata);
 
             // IOSurface content panel: attach/position child CALayers on the content view
-            if (atomic_load_explicit(&(*handle).nativeContainer, memory_order_acquire)) {
-                Panel *contentPanel = atomic_load_explicit(&(*handle).contentPanel, memory_order_acquire);
-                if (contentPanel) {
-                    Window_compositeIOSurfaceChildren(handle, contentPanel);
-                }
+            Panel *contentPanel = atomic_load_explicit(&(*handle).contentPanel, memory_order_acquire);
+            if (contentPanel) {
+                Window_compositeIOSurfaceChildren(handle, contentPanel);
             }
 
             // Discriminator probe: who is stretching? Log what the layer
@@ -854,6 +844,7 @@ static Window *windowAlloc(const WindowDesc *desc) {
         [window setReleasedWhenClosed:NO];   // we own the window object; close must not free it
 
         AntiContentView *contentView = [[AntiContentView alloc] initWithFrame:frame];
+        [contentView setWantsLayer:YES];
         [window setContentView:contentView];
 
         // Green traffic light enters native fullscreen (mirrors legacy allocate()).
@@ -1044,36 +1035,6 @@ Panel *Window_getScenePanel(const Window *window) {
     return window ? atomic_load_explicit(&(*window).scenePanel, memory_order_acquire) : nullptr;
 }
 
-void Window_forceNativeContainerOnRoot(Window *window, bool flag) {
-    if (!window)
-        return;
-    bool wasFlag = atomic_load_explicit(&(*window).nativeContainer, memory_order_acquire);
-    atomic_store_explicit(&(*window).nativeContainer, flag, memory_order_release);
-    // When enabling, attach IOSurface backing to non-scene children
-    // of the content panel. The content panel itself stays as a logical
-    // placeholder.
-    if (flag && !wasFlag) {
-        Panel *contentPanel = atomic_load_explicit(&(*window).contentPanel, memory_order_acquire);
-        if (contentPanel) {
-            int w = Window_width(window);
-            int h = Window_height(window);
-            if (w <= 0) w = (*window).cachedWidth > 0 ? (*window).cachedWidth : 800;
-            if (h <= 0) h = (*window).cachedHeight > 0 ? (*window).cachedHeight : 600;
-            Window_attachPanelIOSurface(window, contentPanel, w, h);
-        }
-        // Ensure the contentView has a layer for compositing
-        NSWindow *nsWindow = (*window).nsWindow;
-        if (nsWindow) {
-            NSView *contentView = [nsWindow contentView];
-            if (contentView) [contentView setWantsLayer:YES];
-        }
-    }
-}
-
-bool Window_isNativeContainerOnRoot(const Window *window) {
-    return window ? atomic_load_explicit(&(*window).nativeContainer, memory_order_acquire) : false;
-}
-
 // --- IOSurface panel bridge (C callable from renderer) ------------------------
 //
 // Child-iteration logic lives in panel_bridge.c (a pure-C file that can
@@ -1114,15 +1075,14 @@ void Window_compositeIOSurfaceChildren(Window *window, Panel *contentPanel) {
         if (!contentView) return;
         
         NSView *vulkanView = nil;
+        Class vkClass = NSClassFromString(@"AntiVulkanView");
         for (NSView *v in [contentView subviews]) {
-            if ([NSStringFromClass([v class]) isEqualToString:@"AntiVulkanView"]) {
+            if (vkClass && [v isKindOfClass:vkClass]) {
                 vulkanView = v;
                 break;
             }
         }
-        if (!vulkanView) return;
-
-        CALayer *rootLayer = [vulkanView layer];
+        CALayer *rootLayer = vulkanView ? [vulkanView layer] : [contentView layer];
         if (!rootLayer) return;
 
         [CATransaction begin];
@@ -1916,11 +1876,9 @@ void *Window_contentView(Window *window) {
     (*w).cachedHeight = (int) newSize.height;
 
     // Synchronously resolve 9-part anchors and layer layout for all IOSurface children
-    if (atomic_load_explicit(&(*w).nativeContainer, memory_order_acquire)) {
-        Panel *contentPanel = atomic_load_explicit(&(*w).contentPanel, memory_order_acquire);
-        if (contentPanel)
-            Window_compositeIOSurfaceChildren(w, contentPanel);
-    }
+    Panel *contentPanel = atomic_load_explicit(&(*w).contentPanel, memory_order_acquire);
+    if (contentPanel)
+        Window_compositeIOSurfaceChildren(w, contentPanel);
 
     // Fire resize render hook synchronously inside this layout turn
     if ((*w).resizeRenderFn)
