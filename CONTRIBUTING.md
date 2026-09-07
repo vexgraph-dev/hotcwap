@@ -39,11 +39,11 @@ This boilerplate is **not** an accident, nor is it a misunderstanding of idiomat
 
 ## 3. Supreme Living Document: `preferences.md`
 
-All architectural rules and style invariants are governed by the central constitution in the root workspace:
+All architectural rules and style invariants are governed by the central constitution:
 
-👉 **[vexgraph / preferences.md](../../preferences.md)**
+- **[preferences.md](https://github.com/vexgraph-dev/vexspoke/blob/main/preferences.md)** (tracked in `vexspoke`, accessible locally at `../../preferences.md`)
 
-Whenever preferences or conventions evolve, [`../../preferences.md`](../../preferences.md) is updated and committed locally in the same cycle (Zero Drift Law).
+Whenever preferences or conventions evolve, `preferences.md` is updated and committed locally in the same cycle (Zero Drift Law).
 
 ---
 
