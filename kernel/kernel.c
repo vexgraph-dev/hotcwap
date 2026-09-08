@@ -143,23 +143,23 @@ bool Kernel_tick(Kernel *self, double dt) {
     if (!atomic_load_explicit(&(*self).running, memory_order_relaxed))
         return false;
 
-    // Single Thread-0 OS event pump
+    // 1. Reset per-cycle scratch arena FIRST before any event polling or allocations
+    MemoryArena *scratch = (*self).transientArena;
+    if (scratch)
+        MemoryArena_freeAll(scratch);
+
+    // 2. Single Thread-0 OS event pump
     Window_pollEvents();
 
     Mouse_dispatchEvents();
     Key_dispatchEvents();
-
-    // Reset per-cycle scratch arena
-    MemoryArena *scratch = (*self).transientArena;
-    if (scratch)
-        MemoryArena_freeAll(scratch);
 
     if (Key_isDown(KEY_ESCAPE)) {
         Kernel_stop(self);
         return false;
     }
 
-    // Poll SPV shader watchers on registered applications
+    // 3. Poll SPV shader watchers on registered applications
     for (uint32_t i = 0; i < (*self).applicationCount; i++) {
         Application *app = (*self).applications[i];
         if (!app)
@@ -169,7 +169,7 @@ bool Kernel_tick(Kernel *self, double dt) {
             SpvWatch_snap(spv);
     }
 
-    // Tick each active application
+    // 4. Tick each active application
     bool anyRunning = false;
     for (uint32_t i = 0; i < (*self).applicationCount; i++) {
         Application *app = (*self).applications[i];
@@ -185,6 +185,10 @@ bool Kernel_tick(Kernel *self, double dt) {
         atomic_store_explicit(&(*self).running, false, memory_order_relaxed);
         return false;
     }
+
+    // 5. Presentation pass: single Kernel-owned present pass
+    if (Vk_ready())
+        Vk_clearPresent();
 
     return true;
 }
@@ -207,6 +211,12 @@ int Kernel_run(Kernel *self) {
             if (w) {
                 if (!Vk_ready())
                     Vk_init(w);
+                for (int frame = 0; frame < 60; frame++) {
+                    if (Vk_clearPresent())
+                        break;
+                    struct timespec ws = { 0, 8 * 1000 * 1000 };
+                    nanosleep(&ws, nullptr);
+                }
                 Window_show(w);
             }
         }
