@@ -60,8 +60,10 @@
  *   - Application_init()
  *   - Application_shutdown()
  *   - Application_run(self)
+ *   - Application_start(self)
  *   - Application_stop(self)
  *   - Application_isRunning(self)
+ *   - Application_tick(self, dt)
  *   - Application_free(self)
  *   - Application_addWindow(self, win)
  *   - Application_removeWindow(self, win)
@@ -77,6 +79,7 @@
  *   - Application_getFps(self)
  *   - Application_getFrametimeUs(self)
  *   - Application_getHot(self)
+ *   - Application_getSpvWatch(self)
  *
  * Setters:
  *   - Application_setName(self, name)
@@ -148,6 +151,51 @@ void Application_stop(Application *self) {
     atomic_store_explicit(&(*self).running, false, memory_order_relaxed);
 }
 
+void Application_start(Application *self) {
+    if (!self)
+        return;
+    if (!(*self).hot)
+        (*self).hot = Hot_init("hot");
+    if (!(*self).spvWatch)
+        (*self).spvWatch = SpvWatch_init();
+    atomic_store_explicit(&(*self).running, true, memory_order_relaxed);
+}
+
+bool Application_tick(Application *self, double dt) {
+    if (!self)
+        return false;
+    if (!atomic_load_explicit(&(*self).running, memory_order_relaxed))
+        return false;
+
+    if ((*self).hot) {
+        uint32_t loaded = 0;
+        Hot_poll((*self).hot, &loaded);
+        if (loaded > 0 && (*self).hotReloadFn)
+            (*self).hotReloadFn(self, loaded, (*self).hotReloadUserdata);
+    }
+
+    bool allClosed = ((*self).window_count > 0);
+    for (uint32_t i = 0; i < (*self).window_count; i++) {
+        Window *w = (*self).windows[i];
+        if (!w)
+            continue;
+        if (Window_shouldClose(w))
+            continue;
+        allClosed = false;
+        Window_dispatchEvents(w);
+    }
+
+    if ((*self).window_count > 0 && allClosed) {
+        atomic_store_explicit(&(*self).running, false, memory_order_relaxed);
+        return false;
+    }
+
+    if ((*self).tickFn)
+        (*self).tickFn(self, dt, (*self).tickUserdata);
+
+    return true;
+}
+
 bool Application_isRunning(const Application *self) {
     return self ? atomic_load_explicit(&(*self).running, memory_order_relaxed) : false;
 }
@@ -189,6 +237,10 @@ uint32_t Application_getFrametimeUs(const Application *self) {
 
 HotModule *Application_getHot(const Application *self) {
     return self ? (*self).hot : nullptr;
+}
+
+SpvWatch *Application_getSpvWatch(const Application *self) {
+    return self ? (*self).spvWatch : nullptr;
 }
 
 bool Application_addWindow(Application *self, Window *win) {

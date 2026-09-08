@@ -89,8 +89,10 @@ void Application_free(Application *self);
 
 // --- Execution & Runtime ---
 int  Application_run(Application *self);
+void Application_start(Application *self);
 void Application_stop(Application *self);
 bool Application_isRunning(const Application *self);
+bool Application_tick(Application *self, double dt);
 
 // --- Mode ---
 void    Application_setMode(Application *self, AppMode mode);
@@ -105,6 +107,7 @@ void Application_onHotReload(Application *self, AppHotReloadFn fn, void *userdat
 uint32_t   Application_getFps(const Application *self);
 uint32_t   Application_getFrametimeUs(const Application *self);
 HotModule *Application_getHot(const Application *self);
+SpvWatch  *Application_getSpvWatch(const Application *self);
 
 // --- Identity: symmetric setters / getters (Rule 24) ---
 void        Application_setName(Application *self, const char *name);
