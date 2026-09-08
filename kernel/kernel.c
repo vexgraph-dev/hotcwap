@@ -181,7 +181,7 @@ bool Kernel_tick(Kernel *self, double dt) {
         }
     }
 
-    if ((*self).applicationCount > 0 && !anyRunning) {
+    if (!anyRunning) {
         atomic_store_explicit(&(*self).running, false, memory_order_relaxed);
         return false;
     }
@@ -196,6 +196,8 @@ bool Kernel_tick(Kernel *self, double dt) {
 int Kernel_run(Kernel *self) {
     if (!self)
         return -1;
+    if ((*self).applicationCount == 0)
+        return 0;
     atomic_store_explicit(&(*self).running, true, memory_order_relaxed);
 
     // Warm up / start registered applications
