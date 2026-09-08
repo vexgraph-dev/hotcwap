@@ -26,6 +26,7 @@ if(NOT TARGET hotcwap)
 # next to the loader that persists across module swaps.
 add_library(hotcwap STATIC
     app/application.c
+    kernel/kernel.c
     hot/hot.c
     hot/hot_trampoline.c
     hot/hot_retire.c
