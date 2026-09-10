@@ -188,14 +188,14 @@ int main(void) {
     win_ctx_t ctx = { .frames = 0 };
     g_winCtx = &ctx;
 
-    ctx.window = Window_create("anti", 640, 480);
+    ctx.window = Window_create("vex", 640, 480);
     Window_addKeyAdapter(ctx.window, &g_keyListener);
     Window_addMouseAdapter(ctx.window, &g_mouseListener);
     Window_addTouchAdapter(ctx.window, &g_touchListener);
 
     ctx.loop = (Loop){ .tick = win_tick, .userdata = &ctx, .frame_ms = 16, .running = false };
 
-    Window_setTitle(ctx.window, "anti engine");
+    Window_setTitle(ctx.window, "vex engine");
     Window_setSize(ctx.window, 800, 600);
     Window_setSize(ctx.window, 900, 700);
     Window_setMinSize(ctx.window, 320, 240);

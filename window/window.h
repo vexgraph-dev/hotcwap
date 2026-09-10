@@ -55,7 +55,7 @@ typedef struct Panel Panel;
 // Constructor parameters. Every field has a default; a call site names only
 // what it wants to change. Zero it for pure defaults.
 typedef struct WindowDesc {
-    const char *title;   // default "anti"
+    const char *title;   // default "vex"
     int width;           // default 800
     int height;          // default 600
     int x;               // top-left, default 0

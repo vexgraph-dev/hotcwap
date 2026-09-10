@@ -27,7 +27,7 @@
  *
  * STRUCT FIELDS (Mirroring app/application.h — exactly this file's class):
  * ----------------------------------------------------------------------------
- *   char name[APP_MAX_NAME];               // app name (default "anti")
+ *   char name[APP_MAX_NAME];               // app name (default "vex")
  *   char author[APP_MAX_NAME];             // author / studio (default "")
  *   char version[APP_MAX_VERSION];         // version string, e.g. "1.2.3"
  *   char iconPath[APP_MAX_ICON_PATH];      // icon path reference (default "")
@@ -116,7 +116,7 @@ void Application_shutdown(void) {
 Application *Application_0(void) {
     Application *self = (Application*) calloc(1, sizeof(Application));
     if (!self) return NULL;
-    strncpy((*self).name, "anti", APP_MAX_NAME - 1);
+    strncpy((*self).name, "vex", APP_MAX_NAME - 1);
     (*self).mode = APP_MODE_AUTO;
     return self;
 }

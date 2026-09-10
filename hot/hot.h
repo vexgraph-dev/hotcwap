@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// hot/hot.h — Hotloading system for anti.
+// hot/hot.h — Hotloading system for vex.
 //
 // Each directory in the engine is a dynamically-loaded module (.dylib/.so).
 // Type IDs are frozen ABI contracts — they never change across reloads.

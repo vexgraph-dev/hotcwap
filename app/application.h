@@ -40,7 +40,7 @@ typedef void (*AppTickFn)(Application *self, double dt, void *userdata);
 typedef void (*AppHotReloadFn)(Application *self, uint32_t loaded, void *userdata);
 
 struct Application {
-    char name[APP_MAX_NAME];               // app name (default "anti")
+    char name[APP_MAX_NAME];               // app name (default "vex")
     char author[APP_MAX_NAME];             // author / studio (default "")
     char version[APP_MAX_VERSION];         // version string, e.g. "1.2.3"
     char iconPath[APP_MAX_ICON_PATH];      // icon path reference (default "")
@@ -67,7 +67,7 @@ void Application_shutdown(void);
 
 // --- Overloaded constructors (the Window chooser idiom) ---
 //
-//   Application()                          -> defaults ("anti", no windows)
+//   Application()                          -> defaults ("vex", no windows)
 //   Application("name")                    -> named
 //   Application("name", "author", "1.0.0") -> full identity
 //

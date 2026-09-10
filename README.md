@@ -36,7 +36,7 @@ workspace/
 │   ├── graphvex/                # R1.5 GPU compute, SPIR-V, fonts
 │   ├── darling/                 # R2 feature: UI tree (registers via Application)
 │   ├── api-haven/               # R2 feature: telemetry (registers via callbacks)
-│   └── [R3 engines register as Applications: anti-engine, mini-ide, daw, ...]
+│   └── [R3 engines register as Applications: vex-engine, mini-ide, daw, ...]
 ├── CMakeLists.txt               # Umbrella workspace orchestrator
 └── preferences.md               # Engine architectural style preferences (Rules 1–n, supreme)
 ```
@@ -45,7 +45,7 @@ workspace/
 
 ```c
 Kernel *k = Kernel();              // 1. kernel: master + transient arenas
-Application *app = Application("anti vk probe"); // 2. application
+Application *app = Application("vex vk probe"); // 2. application
 Kernel_addApplication(k, app);     // 3. adding an application in the kernel
 Window *w = Window();              // 4. window (OS-owned, never hot-updated)
 Application_addWindow(app, w);     // 5. adding a window to the application

@@ -1,6 +1,6 @@
 // window_cocoa.m — the AppKit shim (the ".m" glue file).
 //
-// anti's core is pure C11; this is the ONE Objective-C file in the project.
+// vex's core is pure C11; this is the ONE Objective-C file in the project.
 // It exists only to talk to AppKit, because NSWindow/NSApplication are ObjC
 // objects and there is no pure-C way to create them. Everything above this
 // boundary stays C; everything here is "dip into the OS, hand back a handle".
@@ -1058,7 +1058,7 @@ static Window *windowAlloc(const WindowDesc *desc) {
 // Merge a caller's Desc over the defaults. Unset (zero) fields fall back —
 // this is what makes partial designated initializers behave like overloads.
 static WindowDesc descResolve(const WindowDesc *desc) {
-    WindowDesc d = { .title = "anti", .width = 800, .height = 600, .x = 0, .y = 0 };
+    WindowDesc d = { .title = "vex", .width = 800, .height = 600, .x = 0, .y = 0 };
     if (!desc)
         return d;
     if ((*desc).title) d.title = (*desc).title;
@@ -1071,9 +1071,9 @@ static WindowDesc descResolve(const WindowDesc *desc) {
     return d;
 }
 
-// Default constructor: hidden, 800x600, "anti".
+// Default constructor: hidden, 800x600, "vex".
 Window *Window_0(void) {
-    return windowAlloc(&(WindowDesc){ .title = "anti", .width = 800, .height = 600 });
+    return windowAlloc(&(WindowDesc){ .title = "vex", .width = 800, .height = 600 });
 }
 
 // One-arg overload: titled, hidden.

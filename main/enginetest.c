@@ -64,7 +64,7 @@ static void engine_tick(void *userdata) {
 int main(void) {
     // Construct hidden, mutate, then reveal — no half-configured flash.
     g_test.window = Window();
-    Window_setTitle(g_test.window, "anti enginetest");
+    Window_setTitle(g_test.window, "vex enginetest");
     Window_setSize(g_test.window, 800, 600);
     Window_setLocation(g_test.window, 120, 120);
     Window_show(g_test.window);

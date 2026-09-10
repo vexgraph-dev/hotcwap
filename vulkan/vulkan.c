@@ -327,7 +327,7 @@ bool Vk_init(Window *window) {
     }
 
     VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO };
-    app.pApplicationName = "anti";
+    app.pApplicationName = "vex";
     app.apiVersion = VK_API_VERSION_1_2;
 
     VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
