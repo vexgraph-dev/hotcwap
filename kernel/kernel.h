@@ -39,6 +39,7 @@ struct Kernel {
     Application *applications[KERNEL_MAX_APPS];      // registered apps (opaque to engines)
     uint32_t applicationCount;                       // used slots in applications[]
     _Atomic bool running;                            // supervisor active flag
+    Thread *presentWorker;                           // present thread: board + all VkPane chains (GUI mode)
 };
 
 // --- Overloaded constructors ---

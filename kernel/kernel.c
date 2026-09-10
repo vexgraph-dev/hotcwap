@@ -7,8 +7,10 @@
 #include "hot/spv_watch.h"
 #include "input/key.h"
 #include "input/mouse.h"
+#include "oop/type.h"
 #include "time/nanotime.h"
 #include "vulkan/vk.h"
+#include "vulkan/vk_pane.h"
 #include "window/window.h"
 
 ;;OVERVIEW
@@ -30,8 +32,17 @@
  *   Application *applications[KERNEL_MAX_APPS];   // registered apps (opaque handles)
  *   uint32_t applicationCount;                    // used slots in applications[]
  *   _Atomic bool running;                         // supervisor active flag
+ *   Thread *presentWorker;                        // present thread (board + panes)
  *
- * PRIVATE HELPERS: None.
+ * PRIVATE HELPERS:
+ * ----------------------------------------------------------------------------
+ *   kernel_present_job(thread, task)   // worker loop: Vk_clearPresent then
+ *                                      // VkPane_presentAll while running (the
+ *                                      // two-thread live-resize contract: thread
+ *                                      // 0 pumps events, this thread keeps
+ *                                      // presenting/animating during drags).
+ *                                      // Pacing: fence-paced healthy path,
+ *                                      // budget-paced every path, never bare spin.
  *
  * FUNCTION REGISTRY:
  * ----------------------------------------------------------------------------
@@ -137,6 +148,70 @@ bool Kernel_isRunning(const Kernel *self) {
     return atomic_load_explicit(&(*self).running, memory_order_relaxed);
 }
 
+// --- PRESENT WORKER (thread-1 GUI mode) -----------------------------------
+// The two-thread live-resize contract: thread 0 owns the OS event pump and
+// the AppKit live-resize tracking loop, and this worker owns ALL
+// presentation — board swapchain first, then every pane chain — so the four
+// scenes KEEP ANIMATING while the user drags the window (thread 0 is inside
+// the modal tracking loop; it cannot present). Vk_clearPresent is self-paced
+// by the FIFO present semaphore; the loop is purely a render/present pump.
+// Pacing: fence-paced healthy path, budget-paced every path, never bare spin.
+// After each pass (Vk_clearPresent + VkPane_presentAll), pace with nanosleep
+// to a ~16.6ms frame budget. Track consecutive failed passes (both present
+// calls failing/not-ready); on >=2 consecutive failures sleep 8ms instead of
+// remainder. Reset counter on any success. The sleep executes OUTSIDE any
+// Vk_ready() guard so the worker yields CPU to thread 0 even when Vulkan is
+// not ready.
+static void kernel_present_job(Thread *selfThread, void *task) {
+    (void) selfThread;
+    Kernel *self = (Kernel*) task;
+    if (!self)
+        return;
+
+    uint32_t consecutiveFailures = 0;
+    const uint64_t frameBudgetNs = 16666667ULL; // ~60fps
+    const uint64_t minSleepNs = 1000000ULL;     // 1ms floor
+    const uint64_t backoffSleepNs = 8000000ULL; // 8ms backoff
+
+    while (atomic_load_explicit(&(*self).running, memory_order_relaxed)) {
+        struct timespec start;
+        clock_gettime(CLOCK_MONOTONIC, &start);
+
+        bool anySuccess = false;
+        if (Vk_ready()) {
+            if (Vk_clearPresent())
+                anySuccess = true;
+            if (VkPane_presentAll())
+                anySuccess = true;
+        }
+
+        if (anySuccess) {
+            consecutiveFailures = 0;
+        } else {
+            consecutiveFailures++;
+        }
+
+        struct timespec end;
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        uint64_t elapsedNs = (uint64_t)(end.tv_sec - start.tv_sec) * 1000000000ULL
+                           + (uint64_t)(end.tv_nsec - start.tv_nsec);
+
+        uint64_t sleepNs = 0;
+        if (consecutiveFailures >= 2) {
+            sleepNs = backoffSleepNs;
+        } else if (elapsedNs < frameBudgetNs) {
+            sleepNs = frameBudgetNs - elapsedNs;
+            if (sleepNs < minSleepNs)
+                sleepNs = minSleepNs;
+        } else {
+            sleepNs = minSleepNs;
+        }
+
+        struct timespec ts = { 0, (long)sleepNs };
+        nanosleep(&ts, nullptr);
+    }
+}
+
 bool Kernel_tick(Kernel *self, double dt) {
     if (!self)
         return false;
@@ -186,9 +261,16 @@ bool Kernel_tick(Kernel *self, double dt) {
         return false;
     }
 
-    // 5. Presentation pass: single Kernel-owned present pass
-    if (Vk_ready())
+    // 5. Presentation pass — owned by the present worker when Kernel_run
+    // spawned one (two-thread live-resize contract: the worker keeps
+    // presenting the board + panes while thread 0 pumps the drag). The
+    // legacy single-thread path (direct Kernel_tick callers, tests) still
+    // presents here. Rule 14: panes render only into their own chains; the
+    // board never shows them.
+    if (Vk_ready() && !(*self).presentWorker) {
         Vk_clearPresent();
+        VkPane_presentAll();
+    }
 
     return true;
 }
@@ -226,6 +308,15 @@ int Kernel_run(Kernel *self) {
 
     uint64_t lastTick = NanoTime_now();
 
+    // Two-thread mode: spawn the present worker so the board + panes keep
+    // rendering/animating while thread 0 pumps the OS event loop (live
+    // resize tracking runs INSIDE Window_pollEvents on thread 0 — a
+    // single-threaded present loop stops dead during a drag).
+    (*self).presentWorker = Thread_new(TYPE_THREAD_UI_SINGLETON, kernel_present_job,
+                                       1024, false, false);
+    if ((*self).presentWorker && Thread_run((*self).presentWorker))
+        Thread_submit((*self).presentWorker, self);
+
     while (atomic_load_explicit(&(*self).running, memory_order_relaxed)) {
         uint64_t now = NanoTime_now();
         double dt = (double)(now - lastTick) / 1e9;
@@ -239,6 +330,15 @@ int Kernel_run(Kernel *self) {
     }
 
     atomic_store_explicit(&(*self).running, false, memory_order_relaxed);
+
+    // Bounded join (Rule 26/27): the worker's loop checks running each pass
+    // and Vk_clearPresent's waits are all timeout-bounded, so Thread_stop's
+    // join completes in bounded time BEFORE the caller tears down Vulkan.
+    if ((*self).presentWorker) {
+        Thread_stop((*self).presentWorker);
+        (*self).presentWorker = NULL;
+    }
+
     return 0;
 }
 
