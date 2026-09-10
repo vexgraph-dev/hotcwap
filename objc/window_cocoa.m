@@ -7,7 +7,7 @@
 //
 // Design notes:
 //   - sAppDelegate is created once per process (the app lifecycle delegate).
-//   - Each window gets its own AntiWindowDelegate so we can learn about the
+//   - Each window gets its own WindowDelegate so we can learn about the
 //     user clicking the red close button -> sets shouldClose -> engine loop
 //     sees it and exits (see window_demo.c).
 //   - setReleasedWhenClosed:NO is CRITICAL. The default (YES for programmatic
@@ -46,12 +46,12 @@
   * STRUCT FIELDS (local to this file — exactly this file's class):
   * ----------------------------------------------------------------------------
   *   NSWindow *nsWindow;                      // AppKit window (we own it)
-  *   AntiWindowDelegate *delegate;            // per-window close/focus delegate
+  *   WindowDelegate *delegate;            // per-window close/focus delegate
   *   bool shouldClose;                        // true once close requested
   *   uint32_t id;                             // engine window id (1..7, 0 = broadcast)
   *   _Atomic uint64_t sizeGeneration;         // resize-reflection counter (thread 0 bumps)
-  *   int cachedWidth;                         // content width at last pump
-  *   int cachedHeight;                        // content height at last pump
+  *   _Atomic int cachedWidth;                 // content width at last thread-0 pump
+  *   _Atomic int cachedHeight;                // content height at last thread-0 pump
   *   double cachedX;                          // top-left screen X at last pump
   *   double cachedY;                          // top-left screen Y at last pump
   *   double cachedContentX;                   // content top-left X (below title bar)
@@ -69,8 +69,21 @@
   *   int windowAdapterCount;                  // used slots in windowAdapters[]
   *   WindowResizeRenderFn resizeRenderFn;     // resize-cadence render hook
   *   void *resizeRenderUserdata;              // hook userdata
-  *   WindowCursorType cursorType;             // active OS cursor style
-  *
+   *   WindowCursorType cursorType;             // active OS cursor style
+   *
+   * PRIVATE HELPERS (file-local ObjC, no external API):
+   * ----------------------------------------------------------------------------
+   *   VulkanView : NSView — Vulkan backing layer + live-resize / zoom bridge
+   *     BOOL _liveResizing;        // true during NSViewLiveResize (thread 0)
+   *     BOOL _zooming;             // true during instant-zoom bridge (thread 0)
+   *     NSSize _pendingSize;       // stashed size during drag/zoom, consumed at settle
+   *   WindowDelegate : NSObject <NSWindowDelegate> — per-window close/focus/resize delegate
+   *
+   * Zoom bridge contract: double-click titlebar → animationResizeTime returns 0.0
+   * (instant), sets _zooming + kCAGravityResize; setFrameSize freezes drawableSize;
+   * windowDidResize clears _zooming, restores kCAGravityTopLeft, applies true size
+   * in one shot — no intermediate rebuild, no TopLeft crop smear.
+   *
   * FUNCTION REGISTRY:
  * ----------------------------------------------------------------------------
  * Constructors:
@@ -86,6 +99,7 @@
   *   - windowHandleOf(window)
   *   - windowFireClose(window)
   *   - applyLayerGravity(window)
+  *   - findVulkanView(window)                 : resolve VulkanView from contentView subviews
   *   - Window_compositeIOSurfaceChildren(w, contentPanel)
   *   - windowFireFocus(window, focused)
   *   - windowFireResized(window, width, height)
@@ -240,7 +254,7 @@ static CGPoint s_lockCenter = {0, 0};
 // operations, so the registry itself needs no synchronization.
 #define WINDOW_ADAPTER_MAX 16
 
-@class AntiWindowDelegate;
+@class WindowDelegate;
 
 // One opaque handle handed back to C. Holds both NS objects we must keep
 // alive: the window itself and its delegate. `id` is the engine's small
@@ -253,12 +267,12 @@ static CGPoint s_lockCenter = {0, 0};
 // frame and never bumps it — its panel carries the clear color too.
 struct Window {
     NSWindow *nsWindow;
-    AntiWindowDelegate *delegate;
+    WindowDelegate *delegate;
     bool shouldClose;
     uint32_t id;
     _Atomic uint64_t sizeGeneration;
-    int cachedWidth;
-    int cachedHeight;
+    _Atomic int cachedWidth; // content width at last thread-0 pump (worker reads)
+    _Atomic int cachedHeight; // content height at last thread-0 pump (worker reads)
     double cachedX;          // top-left screen coords at last pump (move reflection)
     double cachedY;
     double cachedContentX;   // CONTENT top-left (below title bar), same space
@@ -268,6 +282,7 @@ struct Window {
     _Atomic int presentMode;
     _Atomic bool transparent;
     _Atomic uint64_t renderGeneration;
+    _Atomic bool liveResizing; // thread 0 during NSViewLiveResize; renderer consumes
 
     // --- content root: nullptr => clear-only pass --
     _Atomic(Panel*) container;
@@ -335,10 +350,10 @@ static Window *windowHandleOf(NSWindow *window) {
 
 // Flipped content view so all sublayers and Cocoa geometry natively speak
 // TOP-LEFT coordinates (matching darling Container_resolve layout 1:1).
-@interface AntiContentView : NSView
+@interface WindowContentView : NSView
 @end
 
-@implementation AntiContentView
+@implementation WindowContentView
 - (BOOL)isFlipped {
     return YES;
 }
@@ -347,11 +362,11 @@ static Window *windowHandleOf(NSWindow *window) {
 // App-level delegate: receives lifecycle events for the whole application.
 // applicationShouldTerminateAfterLastWindowClosed lets the process end when
 // the last window goes away (normal for a game/engine run).
-@interface AntiAppDelegate : NSObject <NSApplicationDelegate>
+@interface WindowAppDelegate : NSObject <NSApplicationDelegate>
 @property(nonatomic, assign) bool *shouldClosePtr;
 @end
 
-@implementation AntiAppDelegate
+@implementation WindowAppDelegate
 - (void)applicationWillTerminate:(NSNotification*) notification {
     (void) notification;
     if (self.shouldClosePtr) *self.shouldClosePtr = true;
@@ -367,7 +382,7 @@ static Window *windowHandleOf(NSWindow *window) {
 // bool the engine loop polls, then hand onCloseRequested to every attached
 // window adapter. The pointers are (assign) because the delegate must not
 // own our C struct.
-@interface AntiWindowDelegate : NSObject <NSWindowDelegate>
+@interface WindowDelegate : NSObject <NSWindowDelegate>
 @property(nonatomic, assign) bool *shouldClosePtr;
 @property(nonatomic, assign) Window *handlePtr;
 @end
@@ -375,11 +390,115 @@ static Window *windowHandleOf(NSWindow *window) {
 static void windowFireClose(Window *window);
 static void applyLayerGravity(Window *window);
 
-@implementation AntiWindowDelegate
+// VulkanView: Vulkan backing layer + live-resize / zoom bridge.
+// Full interface forward-declared here so the delegate can access zoom
+// accessors before the @implementation below.
+@interface VulkanView : NSView {
+@public
+    BOOL _liveResizing;
+    BOOL _zooming; // instant-zoom bridge: true between animationResizeTime + windowDidResize
+    BOOL _fullScreenTransitioning; // true during native macOS fullscreen transitions
+    NSSize _pendingSize;
+}
+- (BOOL)isZooming;
+- (void)setZooming:(BOOL)zooming;
+- (BOOL)isFullScreenTransitioning;
+- (void)setFullScreenTransitioning:(BOOL)transitioning;
+- (void)settleAfterResize;
+@end
+
+static VulkanView *findVulkanView(NSWindow *window);
+
+@implementation WindowDelegate
 - (void) windowWillClose:(NSNotification*) notification {
     (void) notification;
     if (self.shouldClosePtr) *self.shouldClosePtr = true;
     if (self.handlePtr) windowFireClose(self.handlePtr);
+}
+
+// Fullscreen transition lifecycle hooks:
+// When entering or exiting native macOS fullscreen (green orb or toggleFullScreen:),
+// macOS performs a desktop Spaces slide animation lasting 1.5 - 2.0 seconds.
+// Prematurely settling in viewDidEndLiveResize (which Cocoa fires at ~11ms on initial frame layout)
+// causes swapchain rebuild churn and locks CAMetalLayer presents against frozen Core Animation
+// transactions. By maintaining liveResizing = true and presentsWithTransaction = NO throughout
+// the Spaces slide, the background worker continues smoothly without stalls, and the true
+// settle executes upon windowDidEnterFullScreen / windowDidExitFullScreen.
+
+- (void)windowWillEnterFullScreen:(NSNotification*) notification {
+    (void) notification;
+    Window *w = self.handlePtr;
+    if (w) {
+        atomic_store_explicit(&(*w).liveResizing, true, memory_order_relaxed);
+    }
+    NSWindow *window = [notification object];
+    VulkanView *vulkanView = findVulkanView(window);
+    if (vulkanView) {
+        [vulkanView setFullScreenTransitioning:YES];
+        if ([[vulkanView layer] isKindOfClass:[CAMetalLayer class]]) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            [(CAMetalLayer*) [vulkanView layer] setContentsGravity:kCAGravityResize];
+            [(CAMetalLayer*) [vulkanView layer] setPresentsWithTransaction:NO];
+            [CATransaction commit];
+        }
+    }
+}
+
+- (void)windowDidEnterFullScreen:(NSNotification*) notification {
+    (void) notification;
+    NSWindow *window = [notification object];
+    VulkanView *vulkanView = findVulkanView(window);
+    if (vulkanView) {
+        [vulkanView setFullScreenTransitioning:NO];
+        [vulkanView settleAfterResize];
+    }
+}
+
+- (void)windowDidFailToEnterFullScreen:(NSWindow*) window {
+    VulkanView *vulkanView = findVulkanView(window);
+    if (vulkanView) {
+        [vulkanView setFullScreenTransitioning:NO];
+        [vulkanView settleAfterResize];
+    }
+}
+
+- (void)windowWillExitFullScreen:(NSNotification*) notification {
+    (void) notification;
+    Window *w = self.handlePtr;
+    if (w) {
+        atomic_store_explicit(&(*w).liveResizing, true, memory_order_relaxed);
+    }
+    NSWindow *window = [notification object];
+    VulkanView *vulkanView = findVulkanView(window);
+    if (vulkanView) {
+        [vulkanView setFullScreenTransitioning:YES];
+        if ([[vulkanView layer] isKindOfClass:[CAMetalLayer class]]) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            [(CAMetalLayer*) [vulkanView layer] setContentsGravity:kCAGravityResize];
+            [(CAMetalLayer*) [vulkanView layer] setPresentsWithTransaction:NO];
+            [CATransaction commit];
+        }
+    }
+}
+
+- (void)windowDidExitFullScreen:(NSNotification*) notification {
+    (void) notification;
+    NSWindow *window = [notification object];
+    VulkanView *vulkanView = findVulkanView(window);
+    if (vulkanView) {
+        [vulkanView setFullScreenTransitioning:NO];
+        [vulkanView settleAfterResize];
+    }
+}
+
+- (void)windowDidFailToExitFullScreen:(NSWindow*) window {
+    VulkanView *vulkanView = findVulkanView(window);
+    if (vulkanView) {
+        [vulkanView setFullScreenTransitioning:NO];
+        [vulkanView settleAfterResize];
+    }
 }
 
 // Kill every animated frame change for this window. The OS's zoom animation
@@ -388,9 +507,27 @@ static void applyLayerGravity(Window *window);
 // smear/stretch no matter what the renderer does. Returning zero makes
 // setFrame:display:animate:YES land instantly: ONE real resize that the
 // TopLeft gravity law + resize-cadence bridge present honestly.
+//
+// Zoom bridge: set _zooming + Resize gravity so setFrameSize: freezes
+// drawableSize (no intermediate scales), then windowDidResize restores
+// TopLeft and applies the true final size in one shot.
 - (NSTimeInterval)window:(NSWindow*) window animationResizeTime:(NSRect)newFrame {
-    (void) window;
     (void) newFrame;
+    Window *w = self.handlePtr;
+    if (w) {
+        atomic_store_explicit(&(*w).liveResizing, true, memory_order_relaxed);
+    }
+    VulkanView *vulkanView = findVulkanView(window);
+    if (vulkanView) {
+        [vulkanView setZooming:YES];
+        if ([[vulkanView layer] isKindOfClass:[CAMetalLayer class]]) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            [(CAMetalLayer*) [vulkanView layer] setContentsGravity:kCAGravityResize];
+            [(CAMetalLayer*) [vulkanView layer] setPresentsWithTransaction:NO];
+            [CATransaction commit];
+        }
+    }
     return 0.0;
 }
 
@@ -410,14 +547,8 @@ static void applyLayerGravity(Window *window);
     Window *w = self.handlePtr;
     if (w) {
         NSRect content = [(*w).nsWindow contentRectForFrameRect:NSMakeRect(0, 0, frameSize.width, frameSize.height)];
-        (*w).cachedWidth = (int)content.size.width;
-        (*w).cachedHeight = (int)content.size.height;
-        Panel *contentPanel = atomic_load_explicit(&(*w).contentPanel, memory_order_acquire);
-        if (contentPanel) {
-            Window_compositeIOSurfaceChildren(w, contentPanel);
-        }
-        if ((*w).resizeRenderFn)
-            (*w).resizeRenderFn((*w).resizeRenderUserdata);
+        atomic_store_explicit(&(*w).cachedWidth, (int)content.size.width, memory_order_relaxed);
+        atomic_store_explicit(&(*w).cachedHeight, (int)content.size.height, memory_order_relaxed);
     }
     return frameSize;
 }
@@ -425,21 +556,46 @@ static void applyLayerGravity(Window *window);
 - (void)windowDidResize:(NSNotification*) notification {
     (void) notification;
     Window *w = self.handlePtr;
-    if (w) {
-        NSRect content = [(*w).nsWindow contentRectForFrameRect:[(*w).nsWindow frame]];
-        (*w).cachedWidth = (int)content.size.width;
-        (*w).cachedHeight = (int)content.size.height;
-        Panel *contentPanel = atomic_load_explicit(&(*w).contentPanel, memory_order_acquire);
-        if (contentPanel) {
-            Window_compositeIOSurfaceChildren(w, contentPanel);
-        }
-        if ((*w).resizeRenderFn)
-            (*w).resizeRenderFn((*w).resizeRenderUserdata);
+    if (!w) return;
+
+    NSRect content = [(*w).nsWindow contentRectForFrameRect:[(*w).nsWindow frame]];
+    atomic_store_explicit(&(*w).cachedWidth, (int)content.size.width, memory_order_relaxed);
+    atomic_store_explicit(&(*w).cachedHeight, (int)content.size.height, memory_order_relaxed);
+
+    VulkanView *vulkanView = findVulkanView((*w).nsWindow);
+    // LIVE RESIZE / ZOOM / FULLSCREEN GATE: during an active drag, zoom animation, or
+    // fullscreen space transition, intermediate steps must NOT settle or mutate layer frames.
+    // viewDidEndLiveResize or windowDidEnter/ExitFullScreen owns the settle pass. Prematurely
+    // clearing flags mid-animation causes layout fighting and churn.
+    if ([(*w).nsWindow inLiveResize] || Window_isLiveResizing(w)
+        || (vulkanView && (vulkanView->_liveResizing || vulkanView->_fullScreenTransitioning))) {
+        return;
     }
+
+    // Programmatic / non-live resize settle pass
+    if (vulkanView && [[vulkanView layer] isKindOfClass:[CAMetalLayer class]]) {
+        CGFloat scale = [(*w).nsWindow backingScaleFactor];
+        if (scale <= 0.0)
+            scale = 1.0;
+        int pxW = (int)(content.size.width * scale + 0.5);
+        int pxH = (int)(content.size.height * scale + 0.5);
+        if (pxW > 0 && pxH > 0) {
+            CAMetalLayer *metal = (CAMetalLayer*) [vulkanView layer];
+            metal.drawableSize = CGSizeMake((CGFloat) pxW, (CGFloat) pxH);
+        }
+    }
+    Panel *contentPanel = atomic_load_explicit(&(*w).contentPanel, memory_order_acquire);
+    if (contentPanel) {
+        extern void Darling_setPanelSize(Panel *p, float w, float h);
+        Darling_setPanelSize(contentPanel, (float)content.size.width, (float)content.size.height);
+        Window_compositeIOSurfaceChildren(w, contentPanel);
+    }
+    if ((*w).resizeRenderFn)
+        (*w).resizeRenderFn((*w).resizeRenderUserdata);
 }
 @end
 
-static AntiAppDelegate *sAppDelegate = nil; // one app delegate for the whole process
+static WindowAppDelegate *sAppDelegate = nil; // one app delegate for the whole process
 static NSWindow *sLastWindow = nil;
 // Key-window claim pending: set by Window_show/Window_focus, drained by the
 // pump (Window_pollEvents) once the app is active and the claim sticks.
@@ -729,9 +885,10 @@ void Window_pollEvents(void) {
             int cw = (int)content.size.width;
             int ch = (int)content.size.height;
             bool rectChanged = false;
-            if (cw != (*handle).cachedWidth || ch != (*handle).cachedHeight) {
-                (*handle).cachedWidth = cw;
-                (*handle).cachedHeight = ch;
+            if (cw != atomic_load_explicit(&(*handle).cachedWidth, memory_order_relaxed)
+                || ch != atomic_load_explicit(&(*handle).cachedHeight, memory_order_relaxed)) {
+                atomic_store_explicit(&(*handle).cachedWidth, cw, memory_order_relaxed);
+                atomic_store_explicit(&(*handle).cachedHeight, ch, memory_order_relaxed);
                 atomic_fetch_add_explicit(&(*handle).sizeGeneration, 1, memory_order_release);
                 windowFireResized(handle, cw, ch);
                 rectChanged = true;
@@ -768,10 +925,13 @@ void Window_pollEvents(void) {
             // fire adapters only when the window changed screens.
             refreshMonitorId(handle);
 
-            // Gravity contract: TopLeft is UNCONDITIONAL POLICY, asserted
+            // Gravity contract: TopLeft is STEADY-STATE POLICY, asserted
             // every pass on thread 0 before any present can sample the
-            // layer. There is no stretch mode to fall back into.
-            applyLayerGravity(handle);
+            // layer. During live resize (Rule 11.6) the drag owns Resize
+            // gravity; we must NOT fight the kCAGravityResize set in
+            // viewWillStartLiveResize.
+            if (!Window_isLiveResizing(handle))
+                applyLayerGravity(handle);
 
             // Resize-cadence bridge: geometry moved this pass -> hand thread
             // 0's fresh caches straight to the compositor renderer. Runs
@@ -822,7 +982,7 @@ static Window *windowAlloc(const WindowDesc *desc) {
             [NSApplication sharedApplication];   // bootstrap the app object once
         }
         if (!sAppDelegate) {
-            sAppDelegate = [[AntiAppDelegate alloc] init];
+            sAppDelegate = [[WindowAppDelegate alloc] init];
             [NSApp setDelegate:sAppDelegate];
             [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
             [NSApp activateIgnoringOtherApps:YES];
@@ -843,7 +1003,7 @@ static Window *windowAlloc(const WindowDesc *desc) {
         [window setTitle:[NSString stringWithUTF8String:(*desc).title]];
         [window setReleasedWhenClosed:NO];   // we own the window object; close must not free it
 
-        AntiContentView *contentView = [[AntiContentView alloc] initWithFrame:frame];
+        WindowContentView *contentView = [[WindowContentView alloc] initWithFrame:frame];
         [contentView setWantsLayer:YES];
         [window setContentView:contentView];
 
@@ -858,7 +1018,7 @@ static Window *windowAlloc(const WindowDesc *desc) {
         // allowedTouchTypes API replaces the deprecated setAcceptsTouchEvents:.
         [window.contentView setAllowedTouchTypes:NSTouchTypeMaskDirect | NSTouchTypeMaskIndirect];
 
-        AntiWindowDelegate *delegate = [[AntiWindowDelegate alloc] init];
+        WindowDelegate *delegate = [[WindowDelegate alloc] init];
         [window setDelegate:delegate];
 
         Window *w = (Window*) calloc(1, sizeof(Window));
@@ -867,8 +1027,8 @@ static Window *windowAlloc(const WindowDesc *desc) {
         (*w).shouldClose = false;
         atomic_store_explicit(&(*w).sizeGeneration, 0, memory_order_relaxed);
         NSRect initialContent = [window contentRectForFrameRect:[window frame]];
-        (*w).cachedWidth = (int)initialContent.size.width;
-        (*w).cachedHeight = (int)initialContent.size.height;
+        atomic_store_explicit(&(*w).cachedWidth, (int)initialContent.size.width, memory_order_relaxed);
+        atomic_store_explicit(&(*w).cachedHeight, (int)initialContent.size.height, memory_order_relaxed);
         NSRect initialFrame = [window frame];
         CGFloat screenH = [[NSScreen mainScreen] frame].size.height;
         (*w).cachedX = (double)initialFrame.origin.x;
@@ -1042,15 +1202,15 @@ Panel *Window_getScenePanel(const Window *window) {
 
 bool Window_attachPanelIOSurface(Window *window, Panel *panel, int width, int height) {
     if (!window || !panel) return false;
-    extern int anti_AttachPanelIOSurfaceChildren(Window *, Panel *, int, int);
+    extern int Darling_attachPanelIOSurfaceChildren(Window *, Panel *, int, int);
     // Attach IOSurface backing to ALL children of the content panel
-    return anti_AttachPanelIOSurfaceChildren(window, panel, width, height) >= 0;
+    return Darling_attachPanelIOSurfaceChildren(window, panel, width, height) >= 0;
 }
 
 bool Window_resizePanelIOSurface(Window *window, Panel *panel, int width, int height) {
     if (!window || !panel) return false;
-    extern int anti_ResizePanelIOSurfaceChildren(Window *, Panel *, int, int);
-    return anti_ResizePanelIOSurfaceChildren(window, panel, width, height) >= 0;
+    extern int Darling_resizePanelIOSurfaceChildren(Window *, Panel *, int, int);
+    return Darling_resizePanelIOSurfaceChildren(window, panel, width, height) >= 0;
 }
 
 void *Window_getPanelLayer(Window *window, Panel *panel) {
@@ -1063,7 +1223,20 @@ void *Window_getPanelLayer(Window *window, Panel *panel) {
 
 void Window_compositeIOSurfaceChildren(Window *window, Panel *contentPanel) {
     if (!window || !contentPanel) return;
-    
+
+    // LIVE-RESIZE CONTRACT (Rule 11.6): while the window is being dragged,
+    // pane/corner layers are anchored by CoreAnimation AUTORESIZING
+    // (PanelCocoa_setAnchors' autoresizingMask + anchorPoint), which
+    // WindowServer lays out INSIDE the window-resize transaction — moving the
+    // sublayer in lockstep with the window edge on the same vsync, zero CPU
+    // math, zero catch-up. Per-event explicit frames (Darling_getChildLayout)
+    // would fight that accelerated pass and trail the live edge by a beat —
+    // the right/bottom "catching up" artifact. Darling_preFrame is already
+    // gated; this is the thread-0 twin. The settle pass re-applies exact
+    // frames once the flag clears.
+    if (Window_isLiveResizing(window))
+        return;
+
     // CoreAnimation strictly requires layer tree mutations to occur on the main thread.
     // If the Vulkan background worker calls this, it must be asynchronously dispatched,
     // but if we're already on the main thread (e.g. during live resize tracking), we must
@@ -1075,7 +1248,7 @@ void Window_compositeIOSurfaceChildren(Window *window, Panel *contentPanel) {
         if (!contentView) return;
         
         NSView *vulkanView = nil;
-        Class vkClass = NSClassFromString(@"AntiVulkanView");
+        Class vkClass = NSClassFromString(@"VulkanView");
         for (NSView *v in [contentView subviews]) {
             if (vkClass && [v isKindOfClass:vkClass]) {
                 vulkanView = v;
@@ -1088,19 +1261,19 @@ void Window_compositeIOSurfaceChildren(Window *window, Panel *contentPanel) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
 
-        extern int anti_GetChildCount(Panel *contentPanel);
-        extern Panel *anti_GetChildAt(Panel *contentPanel, int index);
-        extern void anti_GetChildLayout(Panel *child, float winW, float winH, float *outX, float *outY, float *outW, float *outH);
-        extern int anti_GetChildParentAnchor(Panel *child);
-        extern int anti_GetChildSelfAnchor(Panel *child);
+        extern int Darling_getChildCount(Panel *contentPanel);
+        extern Panel *Darling_getChildAt(Panel *contentPanel, int index);
+        extern void Darling_getChildLayout(Panel *child, float winW, float winH, float *outX, float *outY, float *outW, float *outH);
+        extern int Darling_getChildAnchor(Panel *child);
+        extern int Darling_getChildPivot(Panel *child);
         extern void *PanelCocoa_fromPanel(void *panel);
         extern void *PanelCocoa_layer(void *pc);
-        extern void PanelCocoa_setAnchors(void *pc, int parentAnchor, int selfAnchor);
+        extern void PanelCocoa_setAnchors(void *pc, int anchor, int pivot);
 
         // Add/update CALayers for each child
-        int childCount = anti_GetChildCount(contentPanel);
+        int childCount = Darling_getChildCount(contentPanel);
         for (int i = 0; i < childCount; i++) {
-            Panel *child = anti_GetChildAt(contentPanel, i);
+            Panel *child = Darling_getChildAt(contentPanel, i);
             if (!child) continue;
             void *pc = PanelCocoa_fromPanel(child);
             if (!pc) continue;
@@ -1114,14 +1287,14 @@ void Window_compositeIOSurfaceChildren(Window *window, Panel *contentPanel) {
             if (scale <= 0.0) scale = 1.0;
             childLayer.contentsScale = scale;
 
-            // Apply anchor settings to layer (contentsGravity + autoresizingMask)
-            int parentAnchor = anti_GetChildParentAnchor(child);
-            int selfAnchor = anti_GetChildSelfAnchor(child);
-            PanelCocoa_setAnchors(pc, parentAnchor, selfAnchor);
+            // Apply anchor+pivot settings to layer (contentsGravity + autoresizingMask)
+            int anchor = Darling_getChildAnchor(child);
+            int pivot = Darling_getChildPivot(child);
+            PanelCocoa_setAnchors(pc, anchor, pivot);
 
             // Get layout rect for positioning
             float rx, ry, rw, rh;
-            anti_GetChildLayout(child, (float)Window_width(window), (float)Window_height(window), &rx, &ry, &rw, &rh);
+            Darling_getChildLayout(child, (float)Window_width(window), (float)Window_height(window), &rx, &ry, &rw, &rh);
             [childLayer setFrame:CGRectMake(rx, ry, rw, rh)];
 
             // Add to root layer if not already there
@@ -1149,6 +1322,10 @@ void Window_setEnabled(Window *window, bool enabled) {
 
 bool Window_isEnabled(const Window *window) {
     return window ? atomic_load_explicit(&(*window).enabled, memory_order_relaxed) : false;
+}
+
+bool Window_isLiveResizing(const Window *window) {
+    return window ? atomic_load_explicit(&(*window).liveResizing, memory_order_relaxed) : false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1195,13 +1372,17 @@ void Window_setTitle(Window *window, const char *title) {
 int Window_width(Window *window) {
     if (!window)
         return 0;
-    return (int)[(*window).nsWindow contentRectForFrameRect:[(*window).nsWindow frame]].size.width;
+    // Atomic cache, not a live AppKit call: thread 0 writes cachedWidth in
+    // setFrameSize/willResize/didResize/the pollEvents pump; the present
+    // worker reads it every frame (two-thread live-resize contract —
+    // calling contentRectForFrameRect from the worker would race AppKit).
+    return atomic_load_explicit(&(*window).cachedWidth, memory_order_relaxed);
 }
 
 int Window_height(Window *window) {
     if (!window)
         return 0;
-    return (int)[(*window).nsWindow contentRectForFrameRect:[(*window).nsWindow frame]].size.height;
+    return atomic_load_explicit(&(*window).cachedHeight, memory_order_relaxed);
 }
 
 void Window_setSize(Window *window, int width, int height) {
@@ -1815,17 +1996,130 @@ void *Window_contentView(Window *window) {
     return (__bridge void*)[(*window).nsWindow contentView];
 }
 
-@interface AntiVulkanView : NSView
-@end
-
-@implementation AntiVulkanView
+@implementation VulkanView
 - (BOOL)isFlipped {
     return YES;
 }
 
 - (NSView*)hitTest:(NSPoint)point {
     (void) point;
-    return nil; // Let events pass through to AntiContentView
+    return nil; // Let events pass through to WindowContentView
+}
+
+// Zoom bridge accessors — thread 0 only, no atomic.
+- (BOOL)isZooming {
+    return _zooming;
+}
+
+- (void)setZooming:(BOOL)zooming {
+    _zooming = zooming;
+}
+
+- (BOOL)isFullScreenTransitioning {
+    return _fullScreenTransitioning;
+}
+
+- (void)setFullScreenTransitioning:(BOOL)transitioning {
+    _fullScreenTransitioning = transitioning;
+}
+
+- (void)settleAfterResize {
+    _liveResizing = NO;
+    _zooming = NO;
+    Window *w = windowHandleOf([self window]);
+    if (w) {
+        // Settle: release the live-resize gate so the NEXT present pass runs
+        // one final caps-drift rebuild and one final IOSurface re-record at
+        // the true final size. The flag clears BEFORE resizeRenderFn so that
+        // settle pass sees a non-live window.
+        atomic_store_explicit(&(*w).liveResizing, false, memory_order_relaxed);
+
+        NSSize currentFrameSize = [self frame].size;
+        NSSize finalSize = (currentFrameSize.width > 0.0 && currentFrameSize.height > 0.0)
+            ? currentFrameSize
+            : ((_pendingSize.width > 0.0 && _pendingSize.height > 0.0) ? _pendingSize : NSZeroSize);
+        _pendingSize = NSZeroSize;
+
+        atomic_store_explicit(&(*w).cachedWidth, (int)finalSize.width, memory_order_relaxed);
+        atomic_store_explicit(&(*w).cachedHeight, (int)finalSize.height, memory_order_relaxed);
+
+        if ([[self layer] isKindOfClass:[CAMetalLayer class]]) {
+            // Restore exact 1:1 pinning BEFORE the final drawableSize lands:
+            // the stretched drag frame is replaced by the settle rebuild's
+            // exact-size present. TopLeft crops the last frozen drawable for
+            // the one-frame gap between settle and rebuild — never stretches.
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            [(CAMetalLayer*) [self layer] setContentsGravity:kCAGravityTopLeft];
+            // Worker-owned present resumes transaction commits at settle.
+            [(CAMetalLayer*) [self layer] setPresentsWithTransaction:YES];
+            [CATransaction commit];
+        }
+
+        if ([[self layer] isKindOfClass:[CAMetalLayer class]]) {
+            CAMetalLayer *metal = (CAMetalLayer*) [self layer];
+            CGFloat scale = [[self window] backingScaleFactor];
+            if (scale <= 0.0)
+                scale = 1.0;
+            metal.drawableSize = CGSizeMake((CGFloat)(finalSize.width * scale + 0.5),
+                                            (CGFloat)(finalSize.height * scale + 0.5));
+        }
+
+        // Apply exact settled layout rects for all panels synchronously on thread 0
+        Panel *contentPanel = atomic_load_explicit(&(*w).contentPanel, memory_order_acquire);
+        if (contentPanel) {
+            extern void Darling_setPanelSize(Panel *p, float w, float h);
+            Darling_setPanelSize(contentPanel, (float)finalSize.width, (float)finalSize.height);
+            Window_compositeIOSurfaceChildren(w, contentPanel);
+        }
+
+        if ((*w).resizeRenderFn)
+            (*w).resizeRenderFn((*w).resizeRenderUserdata);
+    }
+}
+
+- (void)viewWillStartLiveResize {
+    _liveResizing = YES;
+    Window *w = windowHandleOf([self window]);
+    if (w)
+        atomic_store_explicit(&(*w).liveResizing, true, memory_order_relaxed);
+
+    // GAP-FREE DRAG: while the board swapchain stays at its frozen extent,
+    // stretch the last presented frame to cover the LIVE bounds every drag
+    // step (kCAGravityResize). TopLeft would pin the old frame and expose an
+    // empty gorge beyond the frozen extent as the window grows — the visible
+    // "resize delay"/gap. The panes (separate CALayer sublayers) are not
+    // affected by this gravity; they keep animating in place, and the settle
+    // rebuild replaces the stretched frame with an exact TopLeft one.
+    // Pane anchoring during the drag is WindowServer-accelerated: their
+    // autoresizingMask + anchorPoint (PanelCocoa_setAnchors) make CA move the
+    // sublayers inside the window-resize transaction, edge-locked, no per-event
+    // CPU frames (Window_compositeIOSurfaceChildren early-returns while live).
+    if ([[self layer] isKindOfClass:[CAMetalLayer class]]) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        [(CAMetalLayer*) [self layer] setContentsGravity:kCAGravityResize];
+        // Worker-owned present must not defer to thread-0 transaction commits
+        // during drag; steady-state contract unchanged.
+        [(CAMetalLayer*) [self layer] setPresentsWithTransaction:NO];
+        [CATransaction commit];
+    }
+
+    [super viewWillStartLiveResize];
+}
+
+- (void)viewDidEndLiveResize {
+    if (_fullScreenTransitioning) {
+        // Defer settle: during native macOS fullscreen transitions, Cocoa fires
+        // viewDidEndLiveResize ~11ms in on the initial frame layout before the Spaces
+        // slide animation has even visually begun. Settling now would prematurely
+        // clear liveResizing and lock Core Animation transactions, stalling presentation.
+        // windowDidEnterFullScreen / windowDidExitFullScreen will own the true settle.
+        [super viewDidEndLiveResize];
+        return;
+    }
+    [self settleAfterResize];
+    [super viewDidEndLiveResize];
 }
 
 - (CALayer*)makeBackingLayer {
@@ -1867,24 +2161,47 @@ void *Window_contentView(Window *window) {
     if (pxW == 0 || pxH == 0)
         return;
 
+    atomic_store_explicit(&(*w).cachedWidth, (int) newSize.width, memory_order_relaxed);
+    atomic_store_explicit(&(*w).cachedHeight, (int) newSize.height, memory_order_relaxed);
+
+    if (_liveResizing || _zooming || _fullScreenTransitioning || Window_isLiveResizing(w) || [[self window] inLiveResize]) {
+        // LIVE DRAG / ZOOM / FULLSCREEN: freeze the board drawableSize — swapchain stays a
+        // fixed pixel grid while WindowServer composites pane layer-frame moves
+        // at full rate. The final size lands in settleAfterResize.
+        _pendingSize.width = newSize.width;
+        _pendingSize.height = newSize.height;
+        return;
+    }
+
+    Panel *contentPanel = atomic_load_explicit(&(*w).contentPanel, memory_order_acquire);
+    if (contentPanel) {
+        extern void Darling_setPanelSize(Panel *p, float w, float h);
+        Darling_setPanelSize(contentPanel, (float)newSize.width, (float)newSize.height);
+        Window_compositeIOSurfaceChildren(w, contentPanel);
+    }
+
     if ([[self layer] isKindOfClass:[CAMetalLayer class]]) {
         CAMetalLayer *metal = (CAMetalLayer*) [self layer];
         metal.drawableSize = CGSizeMake((CGFloat) pxW, (CGFloat) pxH);
     }
-
-    (*w).cachedWidth = (int) newSize.width;
-    (*w).cachedHeight = (int) newSize.height;
-
-    // Synchronously resolve 9-part anchors and layer layout for all IOSurface children
-    Panel *contentPanel = atomic_load_explicit(&(*w).contentPanel, memory_order_acquire);
-    if (contentPanel)
-        Window_compositeIOSurfaceChildren(w, contentPanel);
 
     // Fire resize render hook synchronously inside this layout turn
     if ((*w).resizeRenderFn)
         (*w).resizeRenderFn((*w).resizeRenderUserdata);
 }
 @end
+
+// Resolve the VulkanView from an NSWindow's contentView subviews (thread 0).
+static VulkanView *findVulkanView(NSWindow *window) {
+    if (!window) return nil;
+    NSView *contentView = [window contentView];
+    if (!contentView) return nil;
+    for (NSView *v in [contentView subviews]) {
+        if ([v isKindOfClass:[VulkanView class]])
+            return (VulkanView*) v;
+    }
+    return nil;
+}
 
 void *Window_metalLayer(Window *window) {
     if (!window || !(*window).nsWindow)
@@ -1893,16 +2210,16 @@ void *Window_metalLayer(Window *window) {
         NSView *contentView = [(*window).nsWindow contentView];
         
         // Find existing Vulkan view or create it
-        AntiVulkanView *vulkanView = nil;
+        VulkanView *vulkanView = nil;
         for (NSView *v in [contentView subviews]) {
-            if ([v isKindOfClass:[AntiVulkanView class]]) {
-                vulkanView = (AntiVulkanView*) v;
+            if ([v isKindOfClass:[VulkanView class]]) {
+                vulkanView = (VulkanView*) v;
                 break;
             }
         }
         
         if (!vulkanView) {
-            vulkanView = [[AntiVulkanView alloc] initWithFrame:contentView.bounds];
+            vulkanView = [[VulkanView alloc] initWithFrame:contentView.bounds];
             [vulkanView setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
             [vulkanView setWantsLayer:YES];
             [contentView addSubview:vulkanView]; // Goes on top of NSVisualEffectView!
@@ -1920,10 +2237,10 @@ static void applyLayerGravity(Window *window) {
         NSView *contentView = [(*window).nsWindow contentView];
         if (!contentView) return;
         
-        AntiVulkanView *vulkanView = nil;
+        VulkanView *vulkanView = nil;
         for (NSView *v in [contentView subviews]) {
-            if ([v isKindOfClass:[AntiVulkanView class]]) {
-                vulkanView = (AntiVulkanView*) v;
+            if ([v isKindOfClass:[VulkanView class]]) {
+                vulkanView = (VulkanView*) v;
                 break;
             }
         }
@@ -1947,14 +2264,15 @@ void Window_setGravityTopLeft(Window *window) {
     // the runloop can service it — beating the next scheduled pump pass in
     // the common case. Safety: capture the NSWindow STRONGLY and resolve
     // the live C handle inside the block, so a window destroyed between
-    // enqueue and execution cannot dangle.
+    // enqueue and execution cannot dangle. During live resize (Rule 11.6)
+    // the drag owns Resize gravity; we must NOT reassert TopLeft mid-drag.
     if (!window)
         return;
     @autoreleasepool {
         NSWindow *nsw = (*window).nsWindow;
         dispatch_async(dispatch_get_main_queue(), ^{
             Window *live = windowHandleOf(nsw);
-            if (live)
+            if (live && !Window_isLiveResizing(live))
                 applyLayerGravity(live);
         });
     }

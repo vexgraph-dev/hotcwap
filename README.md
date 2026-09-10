@@ -90,7 +90,7 @@ target_link_libraries(my_app PRIVATE hotcwap)
 * **`app/application.h/.c`** — Executable identity + window registry: `Application {CLI/TUI/GUI}` with `windows[APP_MAX_WINDOWS]`. Final infrastructure engines rely on, never reverse.
 * **`window/window.h/.c`** — Platform-agnostic window abstraction: creation, sizing, fullscreen toggles, input event dispatch, and title management.
 * **`window/window_linux.c`** — Linux X11/Wayland display backend.
-* **`objc/window_cocoa.m`** — Native macOS AppKit implementation: `NSWindow`, `NSView`, and `CAMetalLayer` creation with Retina backing scale handling and subpixel event mapping.
+* **`objc/window_cocoa.m`** — Native macOS AppKit implementation: `NSWindow`, `NSView`, and `CAMetalLayer` creation with Retina backing scale handling, subpixel event mapping, live-resize/zoom-to-fill orchestration, and native macOS desktop Spaces fullscreen lifecycle.
 * **`hot/hot.h/.c`** — Dynamic module reloader: `dlopen`/`dlsym` lifecycle wrappers and runtime state preservation.
 * **`hot/manifest.h/.c`** — Dynamic file manifest tracker and change detector.
 * **`hot/vk_loader.c`** — Dynamic MoltenVK/Vulkan symbol loader and GPA function table generator.

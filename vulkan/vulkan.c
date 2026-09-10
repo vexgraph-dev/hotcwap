@@ -1372,9 +1372,12 @@ static bool presentFrameLocked(void) {
     }
 
     // Policy drift (presentMode / transparent changed) wants a fresh chain.
+    // During live resize the render-gen drift is expected; rebuild defers to
+    // settle (defense-in-depth with Window_setGravityTopLeft's live-resize
+    // guard: prevents rebuildTargets -> Window_setGravityTopLeft mid-drag).
     if (s_window) {
         uint64_t renderGen = Window_renderGeneration(s_window);
-        if (renderGen != s_appliedRenderGen && !rebuildTargets()) return false;
+        if (renderGen != s_appliedRenderGen && !Window_isLiveResizing(s_window) && !rebuildTargets()) return false;
     }
 
     // Live caps: the surface outgrowing the chain is THE resize signal.
@@ -1385,23 +1388,36 @@ static bool presentFrameLocked(void) {
     if (!s_hzInit) {
         s_hzInit = 1;
         const char *hzEnv = getenv("ANTI_RESIZE_HZ");
-        int hz = hzEnv ? atoi(hzEnv) : 0;
+        // Default 30Hz: swapchain rebuilds during live resize are bounded —
+        // the CAMetalLayer panes never rebuild anyway (Rule 11), and the
+        // board converges on the final size at ~30 traces per second.
+        int hz = hzEnv ? atoi(hzEnv) : 30;
         s_minRebuildGapNs = hz > 0 ? (int64_t)(1000000000LL / hz) : 0;
     }
     VkSurfaceCapabilitiesKHR live;
     memset(&live, 0, sizeof(live));
     if (GetPhysicalDeviceSurfaceCapabilitiesKHR_fn(s_phys, s_surface, &live) == VK_SUCCESS
         && (live.currentExtent.width != s_extent.width || live.currentExtent.height != s_extent.height)) {
-        uint64_t nowNs = NanoTime_now();
-        if (s_lastRebuildNs != 0 && s_minRebuildGapNs > 0
-            && nowNs - s_lastRebuildNs < (uint64_t)s_minRebuildGapNs) {
-            return false;
+        // LIVE RESIZE GATE: during an active drag the renderer keeps
+        // PRESENTING the current chain — the CAMetalLayer scales it to the
+        // live window frame while thread 0 moves pane layers, and no rebuild
+        // happens (a rebuild per drag frame is the size-proportional lag).
+        // On settle (viewDidEndLiveResize) the flag clears, the drawable
+        // lands at the final size, and the next pass rebuilds exactly once.
+        if (Window_isLiveResizing(s_window)) {
+            s_lastRebuildNs = 0;
+        } else {
+            uint64_t nowNs = NanoTime_now();
+            if (s_lastRebuildNs != 0 && s_minRebuildGapNs > 0
+                && nowNs - s_lastRebuildNs < (uint64_t)s_minRebuildGapNs) {
+                return false;
+            }
+            fprintf(stderr, "vk: extent moved %ux%u -> %ux%u; rebuilding\n",
+                    s_extent.width, s_extent.height,
+                    live.currentExtent.width, live.currentExtent.height);
+            if (!rebuildTargets()) return false;
+            s_lastRebuildNs = NanoTime_now();
         }
-        fprintf(stderr, "vk: extent moved %ux%u -> %ux%u; rebuilding\n",
-                s_extent.width, s_extent.height,
-                live.currentExtent.width, live.currentExtent.height);
-        if (!rebuildTargets()) return false;
-        s_lastRebuildNs = NanoTime_now();
     } else {
         s_lastRebuildNs = 0;
     }
@@ -1414,6 +1430,14 @@ static bool presentFrameLocked(void) {
     VkResult ar = AcquireNextImageKHR_fn(s_device, s_swapchain, 25000000ULL /* ~1 frame */,
                                          s_semAcquire, VK_NULL_HANDLE, &imageIndex);
     if (ar == VK_ERROR_OUT_OF_DATE_KHR) {
+        // LIVE RESIZE DEFERRAL: during an active AppKit drag the surface
+        // reports OUT_OF_DATE on every acquire. Rebuilding per drag frame is
+        // the size-proportional lag defect — the CAMetalLayer scales the
+        // current chain to the live frame while thread 0 moves pane layers.
+        // Drop this frame; the settle pass (viewDidEndLiveResize) will rebuild
+        // exactly once at the true final size.
+        if (s_window && Window_isLiveResizing(s_window))
+            return false;
         if (!rebuildTargets()) return false;
         ar = AcquireNextImageKHR_fn(s_device, s_swapchain, 25000000ULL,
                                     s_semAcquire, VK_NULL_HANDLE, &imageIndex);

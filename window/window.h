@@ -191,6 +191,14 @@ uint64_t Window_renderGeneration(const Window *window);
 void Window_setEnabled(Window *window, bool enabled);
 bool Window_isEnabled(const Window *window);
 
+// Live-resize flag: set by thread 0 while AppKit is inside an active window
+// drag (NSViewLiveResize). The renderer reads it to keep presenting the
+// current chain WITHOUT rebuilding: live resize moves CALayer frames (panes
+// track at full rate), it must NOT re-record IOSurface children or rebuild
+// swapchains per drag frame. On settle the flag clears and exactly one
+// re-record + one rebuild converge to the final size.
+bool Window_isLiveResizing(const Window *window);
+
 // --- Chrome capability toggles (style-mask API) ---
 bool Window_isResizable(Window *window);
 void Window_setResizable(Window *window, bool resizable);
