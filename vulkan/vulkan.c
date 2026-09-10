@@ -2,6 +2,7 @@
 #define VK_USE_PLATFORM_METAL_EXT
 
 #include "vulkan/vk.h"
+#include "vulkan/vk_pane.h"
 #include "vulkan/vulkan_mac.h"
 
 #include "annotation/platform_exclusive.h"
@@ -196,6 +197,10 @@ static VkFormat s_format;
 static VkExtent2D s_extent;
 static Window *s_window = nullptr;
 
+unsigned int Vk_getFormat(void) {
+    return (unsigned int) s_format;
+}
+
 // Swapchain images plus their drawable-side plumbing: a view + framebuffer
 // per image lets the render pass draw straight onto the acquired image —
 // the window IS the canvas now. Created per chain, retired with it.
@@ -210,6 +215,10 @@ static uint32_t s_swapchainImageCount = 0;
 // the view passes — child pipelines run here unchanged.
 static VkRenderPass s_drawablePass = VK_NULL_HANDLE;
 static bool ensureDrawablePass(void);
+
+void *Vk_getDrawablePass(void) {
+    return s_drawablePass;
+}
 
 // IOSurface state is owned by vulkan_mac.c (macOS-specific).
 
@@ -768,6 +777,9 @@ void Vk_shutdown(void) {
     if (!s_lib)
         return;
     if (s_device != VK_NULL_HANDLE) {
+        // Per-pane CAMetalLayer chains first; board targets last (Rule 26:
+        // destroy top-down, free last).
+        VkPane_shutdown();
         destroyTargets();
         s_pipelinesBuilt = false;
     }
