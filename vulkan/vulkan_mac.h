@@ -41,6 +41,12 @@ void *VkMac_loadLib(void);
 bool VkMac_createSurface(Window *window, VkInstance instance,
                          PFN_vkGetInstanceProcAddr gpa, VkSurfaceKHR *outSurface);
 
+// Create a VkSurfaceKHR from ANY CAMetalLayer (per-child "pane of glass"
+// swapchain host — e.g. anchored Scene3D children under contentPanel).
+// The layer must already exist; its drawableSize is the surface extent.
+bool VkMac_createSurfaceForLayer(void *layer, VkInstance instance,
+                                 PFN_vkGetInstanceProcAddr gpa, VkSurfaceKHR *outSurface);
+
 // Ensure the BGRA8 offscreen/IOSurface render pass exists.
 bool VkMac_ensureIOSurfacePass(void);
 

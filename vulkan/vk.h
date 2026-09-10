@@ -63,6 +63,12 @@ const char *Vk_status(void);
 void Vk_fillRect(void *cmdBuffer, float surfaceW, float surfaceH, float x, float y, float w, float h,
                  float r, float g, float b, float a);
 
+// Format + render pass currently backing the window's swapchain. Pane
+// (per-CAMetalLayer) swapchains are built with the same format and a
+// compatible pass so every existing pipeline binds unchanged.
+unsigned int Vk_getFormat(void);
+void *Vk_getDrawablePass(void);
+
 // Unified picture mode combining scaling strategy and 1:1 fill anchors.
 typedef enum {
     PICTURE_MODE_FIT               = 0, // Stretch to fill

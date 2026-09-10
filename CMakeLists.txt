@@ -35,6 +35,7 @@ add_library(hotcwap STATIC
     hot/spv_watch.c
     hot/stage.c
     vulkan/vulkan.c
+    vulkan/vk_pane.c
 )
 target_include_directories(hotcwap PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(hotcwap PRIVATE -Wall -Wextra -Werror)

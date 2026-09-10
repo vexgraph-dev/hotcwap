@@ -25,6 +25,7 @@
  * Core Functions:
  *   - VkMac_loadLib(void)
  *   - VkMac_createSurface(window, instance, gpa, outSurface)
+ *   - VkMac_createSurfaceForLayer(layer, instance, gpa, outSurface)
  *   - VkMac_ensureIOSurfacePass(void)
  *   - VkMac_resizeRenderTrampoline(userdata)
  *
@@ -108,16 +109,25 @@ bool VkMac_createSurface(Window *window, VkInstance instance,
     if (!window || !instance || !gpa || !outSurface)
         return false;
 
+    void *metalLayer = Window_metalLayer(window);
+    return VkMac_createSurfaceForLayer(metalLayer, instance, gpa, outSurface);
+}
+
+// Create a VkSurfaceKHR from ANY CAMetalLayer ("pane of glass" host).
+bool VkMac_createSurfaceForLayer(void *layer, VkInstance instance,
+                                 PFN_vkGetInstanceProcAddr gpa, VkSurfaceKHR *outSurface) {
+    if (!layer || !instance || !gpa || !outSurface)
+        return false;
+
     PFN_vkCreateMetalSurfaceEXT CreateMetalSurfaceEXT_fn =
         (PFN_vkCreateMetalSurfaceEXT)gpa(instance, "vkCreateMetalSurfaceEXT");
     if (!CreateMetalSurfaceEXT_fn)
         return false;
 
-    void *metalLayer = Window_metalLayer(window);
     VkMetalSurfaceCreateInfoEXT sci = { .sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT };
-    sci.pLayer = metalLayer;
+    sci.pLayer = layer;
     VkResult sr = CreateMetalSurfaceEXT_fn(instance, &sci, nullptr, outSurface);
-    if (!sci.pLayer || sr != VK_SUCCESS)
+    if (sr != VK_SUCCESS)
         return false;
 
     return true;
