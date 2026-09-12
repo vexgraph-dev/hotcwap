@@ -63,8 +63,9 @@
   *   - rebuildTargets(void)
   *   - destroyTargets(void)
   *   - buildPipelines(void)
-  *   - presentFrameLocked(void)
-  *   - ensureDrawablePass(void)
+ *   - presentFrameLocked(void)
+ *   - presentNote(reason)
+ *   - ensureDrawablePass(void)
   *
  * Setters:
  *   - Vk_setPreFrameRenderer(fn, userdata)
@@ -1334,12 +1335,27 @@ bool Vk_reloadShaders(void) {
     return ok;
 }
 
+// Dropped-present note: every early false out of the present path means a
+// dirtied tree may wait (or be cleared) without painting. Throttled to one
+// line per 2s so a wedged GPU names itself instead of failing silently.
+static void presentNote(const char *reason) {
+    static uint64_t lastNs = 0;
+    uint64_t now = NanoTime_now();
+    if (lastNs != 0 && now - lastNs < 2000000000ULL)
+        return;
+    lastNs = now;
+    fprintf(stderr, "vk: present dropped (%s)\n", reason ? reason : "?");
+    fflush(stderr);
+}
+
 bool Vk_clearPresent(void) {
     // Resize-cadence calls arrive on thread 0 while the worker may be mid-
     // frame. Try-lock: the busy side wins, the other drops this tick — the
     // regular loop always carries fresher state one tick later.
-    if (!SpinLock_tryLock(&s_presentLock))
+    if (!SpinLock_tryLock(&s_presentLock)) {
+        presentNote("present lock busy");
         return false;
+    }
     bool ok = presentFrameLocked();
     SpinLock_unlock(&s_presentLock);
     return ok;
@@ -1348,7 +1364,10 @@ bool Vk_clearPresent(void) {
 static bool presentFrameTail(uint32_t imageIndex);
 
 static bool presentFrameLocked(void) {
-    if (!Vk_ready() || !s_pipelinesBuilt) return false;
+    if (!Vk_ready() || !s_pipelinesBuilt) {
+        presentNote("not ready");
+        return false;
+    }
 
     // Retire the PREVIOUS frame through its fence BEFORE touching the chain.
     // Bounded wait: if the surface died (e.g. fullscreen close yanked the
@@ -1358,8 +1377,10 @@ static bool presentFrameLocked(void) {
     VK_LOAD_DEVICE(WaitForFences)
     VK_LOAD_DEVICE(ResetCommandBuffer)
     VK_LOAD_DEVICE(AcquireNextImageKHR)
-    if (WaitForFences_fn(s_device, 1, &s_fence, VK_TRUE, 100000000ULL) != VK_SUCCESS)
+    if (WaitForFences_fn(s_device, 1, &s_fence, VK_TRUE, 100000000ULL) != VK_SUCCESS) {
+        presentNote("fence wait timeout");
         return false;
+    }
     ResetCommandBuffer_fn(s_cmdBuffer, 0);
 
     if (!s_dumpEnvRead) {
@@ -1377,7 +1398,10 @@ static bool presentFrameLocked(void) {
     // guard: prevents rebuildTargets -> Window_setGravityTopLeft mid-drag).
     if (s_window) {
         uint64_t renderGen = Window_renderGeneration(s_window);
-        if (renderGen != s_appliedRenderGen && !Window_isLiveResizing(s_window) && !rebuildTargets()) return false;
+        if (renderGen != s_appliedRenderGen && !Window_isLiveResizing(s_window) && !rebuildTargets()) {
+            presentNote("render-gen rebuild failed");
+            return false;
+        }
     }
 
     // Live caps: the surface outgrowing the chain is THE resize signal.
@@ -1410,12 +1434,16 @@ static bool presentFrameLocked(void) {
             uint64_t nowNs = NanoTime_now();
             if (s_lastRebuildNs != 0 && s_minRebuildGapNs > 0
                 && nowNs - s_lastRebuildNs < (uint64_t)s_minRebuildGapNs) {
+                presentNote("rebuild throttled on extent drift");
                 return false;
             }
             fprintf(stderr, "vk: extent moved %ux%u -> %ux%u; rebuilding\n",
                     s_extent.width, s_extent.height,
                     live.currentExtent.width, live.currentExtent.height);
-            if (!rebuildTargets()) return false;
+            if (!rebuildTargets()) {
+                presentNote("extent rebuild failed");
+                return false;
+            }
             s_lastRebuildNs = NanoTime_now();
         }
     } else {
@@ -1436,18 +1464,30 @@ static bool presentFrameLocked(void) {
         // current chain to the live frame while thread 0 moves pane layers.
         // Drop this frame; the settle pass (viewDidEndLiveResize) will rebuild
         // exactly once at the true final size.
-        if (s_window && Window_isLiveResizing(s_window))
+        if (s_window && Window_isLiveResizing(s_window)) {
+            presentNote("out-of-date deferred during live resize");
             return false;
-        if (!rebuildTargets()) return false;
+        }
+        if (!rebuildTargets()) {
+            presentNote("out-of-date rebuild failed");
+            return false;
+        }
         ar = AcquireNextImageKHR_fn(s_device, s_swapchain, 25000000ULL,
                                     s_semAcquire, VK_NULL_HANDLE, &imageIndex);
-        if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) return false;
+        if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
+            presentNote("acquire retry failed");
+            return false;
+        }
         return presentFrameTail(imageIndex);
     }
     if (ar == VK_TIMEOUT || ar == VK_NOT_READY) {
+        presentNote("acquire timeout");
         return false;
     }
-    if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) return false;
+    if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
+        presentNote("acquire failed");
+        return false;
+    }
 
     return presentFrameTail(imageIndex);
 }
@@ -1581,9 +1621,12 @@ static bool presentFrameTail(uint32_t imageIndex) {
     if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
         if (pr == VK_ERROR_OUT_OF_DATE_KHR) {
             s_appliedRenderGen = 0;
+            presentNote("present out-of-date");
         }
         return pr == VK_SUBOPTIMAL_KHR;
     }
+    if (pr != VK_SUCCESS)
+        presentNote("present failed");
     return pr == VK_SUCCESS;
 }
 
