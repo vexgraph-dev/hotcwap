@@ -65,6 +65,8 @@
   *   - buildPipelines(void)
  *   - presentFrameLocked(void)
  *   - presentNote(reason)
+ *   - presentNoteCode(what, code)
+ *   - presentRefenceSignaled(void)
  *   - ensureDrawablePass(void)
   *
  * Setters:
@@ -1348,6 +1350,37 @@ static void presentNote(const char *reason) {
     fflush(stderr);
 }
 
+// Numeric-code variant: the VkResult value distinguishes device-lost from
+// OOM from surface-lost on the next repro without any extra probing.
+static void presentNoteCode(const char *what, int code) {
+    char buf[112];
+    snprintf(buf, sizeof(buf), "%s (vk %d)", what ? what : "?", code);
+    presentNote(buf);
+}
+
+// Rebuild the frame fence in the SIGNALED state after a failed submit left
+// it reset with no pending work. An unsignaled fence with nothing queued
+// never signals again — every future WaitForFences would time out and the
+// app would sit at 0fps forever. Recreating signaled restores the
+// wait -> reset -> submit cadence on the very next pass (same pattern as
+// the signaled creation at init). Create-first: if creation fails the old
+// fence is kept (wedged, but no new crash).
+static void presentRefenceSignaled(void) {
+    VK_LOAD_DEVICE_VOID(DestroyFence)
+    VK_LOAD_DEVICE_VOID(CreateFence)
+    if (!DestroyFence_fn || !CreateFence_fn)
+        return;
+    VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    VkFence fresh = VK_NULL_HANDLE;
+    if (CreateFence_fn(s_device, &fci, nullptr, &fresh) != VK_SUCCESS)
+        return;
+    VkFence old = s_fence;
+    s_fence = fresh;
+    if (old != VK_NULL_HANDLE)
+        DestroyFence_fn(s_device, old, nullptr);
+}
+
 bool Vk_clearPresent(void) {
     // Resize-cadence calls arrive on thread 0 while the worker may be mid-
     // frame. Try-lock: the busy side wins, the other drops this tick — the
@@ -1377,9 +1410,18 @@ static bool presentFrameLocked(void) {
     VK_LOAD_DEVICE(WaitForFences)
     VK_LOAD_DEVICE(ResetCommandBuffer)
     VK_LOAD_DEVICE(AcquireNextImageKHR)
+    VK_LOAD_DEVICE(GetFenceStatus)
+    VK_LOAD_DEVICE(ResetFences)
     if (WaitForFences_fn(s_device, 1, &s_fence, VK_TRUE, 100000000ULL) != VK_SUCCESS) {
-        presentNote("fence wait timeout");
-        return false;
+        // Signal landed after the timeout expired: reset and keep the frame
+        // instead of dropping work the GPU already finished.
+        if (GetFenceStatus_fn && GetFenceStatus_fn(s_device, s_fence) == VK_SUCCESS) {
+            if (ResetFences_fn)
+                ResetFences_fn(s_device, 1, &s_fence);
+        } else {
+            presentNote("fence wait timeout");
+            return false;
+        }
     }
     ResetCommandBuffer_fn(s_cmdBuffer, 0);
 
@@ -1485,8 +1527,23 @@ static bool presentFrameLocked(void) {
         return false;
     }
     if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
-        presentNote("acquire failed");
-        return false;
+        // Hard acquire error (surface lost / device lost / OOM): the chain
+        // the fence waits on may already be gone, so try one rebuild before
+        // giving up — a lost surface recovers, a lost device stays loud via
+        // the numeric code above. Bounded: exactly one rebuild + one retry;
+        // the caller's dirty-retry carries fresher state next tick.
+        presentNoteCode("acquire failed", (int) ar);
+        if (!rebuildTargets()) {
+            presentNote("acquire rebuild failed");
+            return false;
+        }
+        ar = AcquireNextImageKHR_fn(s_device, s_swapchain, 25000000ULL,
+                                    s_semAcquire, VK_NULL_HANDLE, &imageIndex);
+        if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
+            presentNoteCode("acquire retry failed", (int) ar);
+            return false;
+        }
+        return presentFrameTail(imageIndex);
     }
 
     return presentFrameTail(imageIndex);
@@ -1609,7 +1666,17 @@ static bool presentFrameTail(uint32_t imageIndex) {
     si.signalSemaphoreCount = 1;
     si.pSignalSemaphores = &s_semRender;
     ResetFences_fn(s_device, 1, &s_fence);
-    QueueSubmit_fn(s_queue, 1, &si, s_fence);
+    VkResult sr = QueueSubmit_fn(s_queue, 1, &si, s_fence);
+    if (sr != VK_SUCCESS) {
+        // A failed submit leaves the just-reset fence with no pending work:
+        // it would never signal again and every future frame would die at
+        // the fence wait (permanent 0fps). Recreate it signaled so the next
+        // pass restores the cadence; skip the present (nothing was queued,
+        // so s_semRender never signals).
+        presentNoteCode("submit failed", (int) sr);
+        presentRefenceSignaled();
+        return false;
+    }
 
     VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
     pi.waitSemaphoreCount = 1;
@@ -1626,7 +1693,7 @@ static bool presentFrameTail(uint32_t imageIndex) {
         return pr == VK_SUBOPTIMAL_KHR;
     }
     if (pr != VK_SUCCESS)
-        presentNote("present failed");
+        presentNoteCode("present failed", (int) pr);
     return pr == VK_SUCCESS;
 }
 
