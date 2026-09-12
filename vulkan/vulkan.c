@@ -61,6 +61,8 @@
   *   - Vk_drawTexture(cmdBuffer, surfaceW, surfaceH, x, y, w, h, r, g, b, a, textureId, mode, imgW, imgH)
   *   - Vk_drawSDFText(cmdBuffer, surfaceW, surfaceH, x, y, w, h, r, g, b, a, textureId, bold, smoothness, u0, v0, u1, v1)
   *   - Vk_drawColorGlyph(cmdBuffer, surfaceW, surfaceH, x, y, w, h, alpha, textureId, u0, v0, u1, v1)
+  *   - (Rule 39 net: drawTexture / drawSDFText / drawColorGlyph clamp textureId
+  *     against Texture_maxBoundId() so OOB ids never reach the bindless sampler)
   *   - rebuildTargets(void)
   *   - destroyTargets(void)
   *   - buildPipelines(void)
@@ -285,6 +287,23 @@ static void *s_libLoad(void) {
     static PFN_vk##name name##_fn; \
     name##_fn = s_gdpa ? (PFN_vk##name)s_gdpa(s_device, "vk" #name) : (PFN_vk##name)s_gpa(s_instance, "vk" #name);
 
+// Rule 39 seam naming: vkSetDebugUtilsObjectNameEXT (VK_EXT_debug_utils) gives
+// every submit's MTLCommandBuffer a human name, so MoltenVK's device-lost log
+// identifies the faulting seam instead of the generic "vkQueueSubmit" label.
+// No-op when the extension or loader is absent; never fails the build path.
+static void Vk_nameObject(VkObjectType type, uint64_t handle, const char *name) {
+    if (!s_device || handle == 0) return;
+    static PFN_vkSetDebugUtilsObjectNameEXT nameFn = nullptr;
+    if (!nameFn && s_gdpa)
+        nameFn = (PFN_vkSetDebugUtilsObjectNameEXT)s_gdpa(s_device, "vkSetDebugUtilsObjectNameEXT");
+    if (!nameFn) return;
+    VkDebugUtilsObjectNameInfoEXT info = { .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT };
+    info.objectType = type;
+    info.objectHandle = handle;
+    info.pObjectName = name;
+    nameFn(s_device, &info);
+}
+
 bool Vk_init(Window *window) {
     VK_MARK("loader+gpa");
 
@@ -323,7 +342,7 @@ bool Vk_init(Window *window) {
     }
 
     int surfaceExt = 0;
-    const char *exts[2];
+    const char *exts[3];
     uint32_t n = 0;
     for (uint32_t i = 0; i < extCount; i++) {
         if (strcmp(names[i], "VK_KHR_surface") == 0)
@@ -332,6 +351,8 @@ bool Vk_init(Window *window) {
             surfaceExt = 1;
             exts[n++] = "VK_EXT_metal_surface";
         }
+        else if (strcmp(names[i], "VK_EXT_debug_utils") == 0)
+            exts[n++] = "VK_EXT_debug_utils";
     }
     if (n < 2 || surfaceExt == 0) {
         snprintf(s_status, sizeof(s_status), "no surface ext (%u seen)", (unsigned)extCount);
@@ -410,7 +431,7 @@ bool Vk_init(Window *window) {
     qci.queueCount = 1;
     qci.pQueuePriorities = &prio;
 
-    const char *devExts[] = { "VK_KHR_swapchain", "VK_EXT_metal_objects" };
+    const char *devExts[] = { "VK_KHR_swapchain", "VK_EXT_metal_objects", "VK_EXT_debug_utils" };
     
     VkPhysicalDeviceDescriptorIndexingFeatures idxFeat = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES };
     idxFeat.descriptorBindingPartiallyBound = VK_TRUE;
@@ -422,7 +443,7 @@ bool Vk_init(Window *window) {
     dci.pNext = &idxFeat;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
-    dci.enabledExtensionCount = 2;
+    dci.enabledExtensionCount = 3;
     dci.ppEnabledExtensionNames = devExts;
 
     if (CreateDevice_fn(s_phys, &dci, nullptr, &s_device) != VK_SUCCESS) {
@@ -1284,6 +1305,7 @@ static bool buildPipelines(void) {
     cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     cbai.commandBufferCount = 1;
     AllocateCommandBuffers_fn(s_device, &cbai, &s_cmdBuffer);
+    Vk_nameObject(VK_OBJECT_TYPE_COMMAND_BUFFER, (uint64_t)s_cmdBuffer, "board present");
 
     s_pipelinesBuilt = true;
     return true;
@@ -1763,6 +1785,11 @@ void Vk_drawTexture(void *cmdBuffer, float surfaceW, float surfaceH,
                     PictureMode mode,
                     float imgW, float imgH) {
     if (!cmdBuffer) return;
+    // Rule 39 hot-minimal clamp: an OOB bindless id (-1 -> 0xFFFFFFFF) reaches
+    // u_textures[nonuniformEXT(...)] unclamped and faults the GPU. Skip the quad.
+    extern int32_t Texture_maxBoundId(void);
+    if (textureId < 0 || (uint32_t)textureId >= (uint32_t)Texture_maxBoundId())
+        return;
 
     // Lazily build the texture pipeline on first call — must use the IOSurface
     // renderpass (BGRA8), which is itself lazy and not available inside buildPipelines().
@@ -2022,6 +2049,11 @@ void Vk_drawSDFText(void *cmdBuffer, float surfaceW, float surfaceH,
                     int32_t textureId, float bold, float smoothness,
                     float u0, float v0, float u1, float v1) {
     if (!ensureSdfPipeline()) return;
+    // Rule 39 hot-minimal clamp: an OOB bindless id (-1 -> 0xFFFFFFFF) reaches
+    // u_textures[nonuniformEXT(...)] unclamped and faults the GPU. Skip the quad.
+    extern int32_t Texture_maxBoundId(void);
+    if (textureId < 0 || (uint32_t)textureId >= (uint32_t)Texture_maxBoundId())
+        return;
     VkCommandBuffer cb = (VkCommandBuffer) cmdBuffer;
 
     VK_LOAD_DEVICE_VOID(CmdBindPipeline)
@@ -2086,6 +2118,11 @@ void Vk_drawColorGlyph(void *cmdBuffer, float surfaceW, float surfaceH,
                        int32_t textureId,
                        float u0, float v0, float u1, float v1) {
     if (!ensureSdfPipeline()) return;
+    // Rule 39 hot-minimal clamp (see Vk_drawSDFText): never let an OOB id reach
+    // the bindless sampler.
+    extern int32_t Texture_maxBoundId(void);
+    if (textureId < 0 || (uint32_t)textureId >= (uint32_t)Texture_maxBoundId())
+        return;
     VkCommandBuffer cb = (VkCommandBuffer) cmdBuffer;
 
     VK_LOAD_DEVICE_VOID(CmdBindPipeline)

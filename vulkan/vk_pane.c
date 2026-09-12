@@ -63,6 +63,23 @@ extern uint32_t s_instanceQueueFamily;
         name##_fn = (PFN_vk##name)s_instanceGdpa(s_instanceDevice, "vk" #name); \
     }
 
+// Rule 39 seam naming: label each pane submit's MTLCommandBuffer so a device-lost
+// log names the pane chain instead of the generic "vkQueueSubmit" string.
+static void VkPane_nameObject(VkObjectType type, uint64_t handle, const char *name) {
+    if (!s_instanceDevice || handle == 0)
+        return;
+    static PFN_vkSetDebugUtilsObjectNameEXT nameFn = nullptr;
+    if (!nameFn && s_instanceGdpa)
+        nameFn = (PFN_vkSetDebugUtilsObjectNameEXT)s_instanceGdpa(s_instanceDevice, "vkSetDebugUtilsObjectNameEXT");
+    if (!nameFn)
+        return;
+    VkDebugUtilsObjectNameInfoEXT info = { .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT };
+    info.objectType = type;
+    info.objectHandle = handle;
+    info.pObjectName = name;
+    nameFn(s_instanceDevice, &info);
+}
+
 #define VK_PANE_CHAIN_MAX 32
 
 typedef struct VkPaneChain {
@@ -409,6 +426,9 @@ int VkPane_register(void *layer, int width, int height, void *owner) {
         SpinLock_unlock(&s_paneLock);
         return -1;
     }
+    char paneName[32];
+    snprintf(paneName, sizeof(paneName), "pane present %d", idx);
+    VkPane_nameObject(VK_OBJECT_TYPE_COMMAND_BUFFER, (uint64_t)(*chain).cb, paneName);
 
     VkSemaphoreCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
     if (CreateSemaphore_fn(s_instanceDevice, &sci, nullptr, &(*chain).semAcquire) != VK_SUCCESS ||
