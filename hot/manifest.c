@@ -2,7 +2,6 @@
 
 #include <string.h>
 #include <stdlib.h>
-#include <stdio.h>
 #include "annotation/overview.h"
 
 ;;OVERVIEW
@@ -20,6 +19,7 @@
  * Core Functions:
  *   - HotManifest_parse(json, len, out)
  *   - HotManifest_compatible(old_manifest, new_manifest)
+ *   - HotManifest_digest(manifest)
  *
  * Getters:
  *   - HotManifest_get_type_id(manifest, name)
@@ -32,6 +32,7 @@
 // This is a deliberately simple parser — no external dependencies.
 // It handles the specific manifest format we need:
 //   {"name": "...", "version": "...", "type_ids": [...], "exports": [...], "dependencies": [...]}
+// Type rows carry {"name", "value"} plus optional "parent"/"size" in any order.
 
 // Skip whitespace
 static const char *skip_ws(const char *p) {
@@ -41,7 +42,7 @@ static const char *skip_ws(const char *p) {
 
 // Parse a JSON string with escape sequence handling (\", \\, \n, \t, \uXXXX)
 static const char *parse_string(const char *p, char *out, size_t out_size) {
-    if (*p != '"') return NULL;
+    if (*p != '"') return nullptr;
     p++;
     size_t i = 0;
     while (*p && *p != '"' && i < out_size - 1) {
@@ -162,12 +163,12 @@ bool HotManifest_parse(const char *json, size_t len, HotManifest *out) {
         if (strcmp(key, "name") == 0) {
             char value[64];
             bool is_hex;
-            p = parse_value(p, value, sizeof(value), NULL, &is_hex);
+            p = parse_value(p, value, sizeof(value), nullptr, &is_hex);
             strncpy((*out).name, value, HOT_MANIFEST_MAX_NAME - 1);
         } else if (strcmp(key, "version") == 0) {
             char value[64];
             bool is_hex;
-            p = parse_value(p, value, sizeof(value), NULL, &is_hex);
+            p = parse_value(p, value, sizeof(value), nullptr, &is_hex);
             strncpy((*out).version, value, HOT_MANIFEST_MAX_VERSION - 1);
         } else if (strcmp(key, "type_ids") == 0) {
             // Expect array
@@ -178,47 +179,66 @@ bool HotManifest_parse(const char *json, size_t len, HotManifest *out) {
                 if (*p == ']') { p++; break; }
                 if (*p == ',') { p++; continue; }
                 
-                // Expect object: {"name": "...", "value": 0x...}
+                // Type row: {"name": "...", "value": 0x...} plus optional
+                // "parent" (class number) and "size" (struct bytes), in any
+                // order. Absent parent/size stay unstated (legacy wire form).
                 if (*p != '{') return false;
                 p++;
-                
+
                 HotTypeId tid;
                 memset(&tid, 0, sizeof(tid));
-                
-                // Parse "name"
-                p = skip_ws(p);
-                char tkey[32];
-                p = parse_string(p, tkey, sizeof(tkey));
-                p = skip_ws(p);
-                if (*p != ':') return false;
-                p++;
-                p = skip_ws(p);
-                char tname[64];
-                bool is_hex;
-                p = parse_value(p, tname, sizeof(tname), NULL, &is_hex);
-                strncpy(tid.name, tname, HOT_MANIFEST_MAX_NAME - 1);
-                
-                // Expect comma
-                p = skip_ws(p);
-                if (*p != ',') return false;
-                p++;
-                
-                // Parse "value"
-                p = skip_ws(p);
-                p = parse_string(p, tkey, sizeof(tkey));
-                p = skip_ws(p);
-                if (*p != ':') return false;
-                p++;
-                p = skip_ws(p);
-                uint64_t tval;
-                p = parse_value(p, NULL, 0, &tval, &is_hex);
-                tid.value = tval;
-                
-                // Expect closing brace
-                p = skip_ws(p);
-                if (*p != '}') return false;
-                p++;
-                
+
+                while (p < end) {
+                    p = skip_ws(p);
+                    if (*p == '}') { p++; break; }
+                    if (*p == ',') { p++; continue; }
+                    char tkey[32];
+                    p = parse_string(p, tkey, sizeof(tkey));
+                    if (!p) return false;
+                    p = skip_ws(p);
+                    if (*p != ':') return false;
+                    p++;
+                    p = skip_ws(p);
+                    if (strcmp(tkey, "name") == 0) {
+                        char tname[64];
+                        bool is_hex = false;
+                        p = parse_value(p, tname, sizeof(tname), nullptr, &is_hex);
+                        if (!p) return false;
+                        strncpy(tid.name, tname, HOT_MANIFEST_MAX_NAME - 1);
+                    } else if (strcmp(tkey, "value") == 0) {
+                        uint64_t tval = 0;
+                        bool is_hex = false;
+                        p = parse_value(p, nullptr, 0, &tval, &is_hex);
+                        if (!p) return false;
+                        tid.value = tval;
+                    } else if (strcmp(tkey, "parent") == 0) {
+                        uint64_t tpar = 0;
+                        bool is_hex = false;
+                        p = parse_value(p, nullptr, 0, &tpar, &is_hex);
+                        if (!p) return false;
+                        tid.parent = (int32_t) tpar;
+                        tid.has_parent = true;
+                    } else if (strcmp(tkey, "size") == 0) {
+                        uint64_t tsize = 0;
+                        bool is_hex = false;
+                        p = parse_value(p, nullptr, 0, &tsize, &is_hex);
+                        if (!p) return false;
+                        tid.size = (uint32_t) tsize;
+                    } else {
+                        // Unknown key — skip value
+                        if (*p == '"') {
+                            char dummy[64];
+                            bool is_hex = false;
+                            p = parse_value(p, dummy, sizeof(dummy), nullptr, &is_hex);
+                        } else {
+                            uint64_t dummy = 0;
+                            bool is_hex = false;
+                            p = parse_value(p, nullptr, 0, &dummy, &is_hex);
+                        }
+                        if (!p) return false;
+                    }
+                }
+
                 if ((*out).type_id_count < HOT_MANIFEST_MAX_TYPE_IDS) {
                     (*out).type_ids[(*out).type_id_count++] = tid;
                 }
@@ -233,7 +253,7 @@ bool HotManifest_parse(const char *json, size_t len, HotManifest *out) {
                 
                 char value[64];
                 bool is_hex;
-                p = parse_value(p, value, sizeof(value), NULL, &is_hex);
+                p = parse_value(p, value, sizeof(value), nullptr, &is_hex);
                 
                 if ((*out).export_count < HOT_MANIFEST_MAX_EXPORTS) {
                     strncpy((*out).exports[(*out).export_count].name, value, HOT_MANIFEST_MAX_NAME - 1);
@@ -250,7 +270,7 @@ bool HotManifest_parse(const char *json, size_t len, HotManifest *out) {
                 
                 char value[64];
                 bool is_hex;
-                p = parse_value(p, value, sizeof(value), NULL, &is_hex);
+                p = parse_value(p, value, sizeof(value), nullptr, &is_hex);
                 
                 if ((*out).dependency_count < HOT_MANIFEST_MAX_DEPENDENCIES) {
                     strncpy((*out).dependencies[(*out).dependency_count].name, value, HOT_MANIFEST_MAX_NAME - 1);
@@ -262,11 +282,11 @@ bool HotManifest_parse(const char *json, size_t len, HotManifest *out) {
             if (*p == '"') {
                 char dummy[64];
                 bool is_hex;
-                p = parse_value(p, dummy, sizeof(dummy), NULL, &is_hex);
+                p = parse_value(p, dummy, sizeof(dummy), nullptr, &is_hex);
             } else {
                 uint64_t dummy;
                 bool is_hex;
-                p = parse_value(p, NULL, 0, &dummy, &is_hex);
+                p = parse_value(p, nullptr, 0, &dummy, &is_hex);
             }
         }
         
@@ -279,18 +299,91 @@ bool HotManifest_parse(const char *json, size_t len, HotManifest *out) {
     return true;
 }
 
+static const HotTypeId *find_type_id(const HotManifest *manifest, const char *name) {
+    if (!manifest || !name)
+        return nullptr;
+    for (uint32_t i = 0; i < (*manifest).type_id_count; i++) {
+        if (strcmp((*manifest).type_ids[i].name, name) == 0)
+            return &(*manifest).type_ids[i];
+    }
+    return nullptr;
+}
+
 bool HotManifest_compatible(const HotManifest *old_manifest, const HotManifest *new_manifest) {
     if (!old_manifest || !new_manifest) return false;
-    
-    // Check that all type_ids in the old manifest exist in the new one with the same value
+
+    // Every old type name must exist in the new manifest with the same value.
+    // Parent chains and struct sizes must match wherever both sides state
+    // them; one-sided parent/size refuses (a side that withholds contract
+    // info cannot prove compatibility). New names in the new manifest are
+    // allowed (growth); removed or renumbered names refuse.
     for (uint32_t i = 0; i < (*old_manifest).type_id_count; i++) {
-        uint64_t new_val = HotManifest_get_type_id(new_manifest, (*old_manifest).type_ids[i].name);
-        if (new_val != (*old_manifest).type_ids[i].value) {
+        const HotTypeId *o = &(*old_manifest).type_ids[i];
+        const HotTypeId *n = find_type_id(new_manifest, (*o).name);
+        if (!n)
             return false;
+        if ((*n).value != (*o).value)
+            return false;
+        if ((*o).has_parent || (*n).has_parent) {
+            if (!((*o).has_parent && (*n).has_parent))
+                return false;
+            if ((*o).parent != (*n).parent)
+                return false;
+        }
+        bool oSize = (*o).size != 0;
+        bool nSize = (*n).size != 0;
+        if (oSize || nSize) {
+            if (!(oSize && nSize))
+                return false;
+            if ((*o).size != (*n).size)
+                return false;
         }
     }
-    
+
     return true;
+}
+
+// FNV-1a 64: offset basis 14695981039346656037, prime 1099511628211.
+static void digest_bytes(uint64_t *hash, const void *data, size_t len) {
+    const uint8_t *bytes = (const uint8_t*) data;
+    for (size_t i = 0; i < len; i++) {
+        *hash ^= (uint64_t) bytes[i];
+        *hash *= 1099511628211ULL;
+    }
+}
+
+uint64_t HotManifest_digest(const HotManifest *manifest) {
+    if (!manifest)
+        return 0;
+    // Canonical order: insertion sort of row indices by name (n <= 256, so
+    // the quadratic sort is trivial). The digest must not depend on JSON
+    // key order — same contract, any order, same digest.
+    uint32_t order[HOT_MANIFEST_MAX_TYPE_IDS];
+    uint32_t n = (*manifest).type_id_count;
+    if (n > HOT_MANIFEST_MAX_TYPE_IDS)
+        n = HOT_MANIFEST_MAX_TYPE_IDS;
+    for (uint32_t i = 0; i < n; i++)
+        order[i] = i;
+    for (uint32_t i = 1; i < n; i++) {
+        uint32_t key = order[i];
+        uint32_t j = i;
+        while (j > 0 && strcmp((*manifest).type_ids[order[j - 1]].name, (*manifest).type_ids[key].name) > 0) {
+            order[j] = order[j - 1];
+            j--;
+        }
+        order[j] = key;
+    }
+    uint64_t hash = 14695981039346656037ULL;
+    for (uint32_t i = 0; i < n; i++) {
+        const HotTypeId *t = &(*manifest).type_ids[order[i]];
+        digest_bytes(&hash, (*t).name, strlen((*t).name) + 1);
+        digest_bytes(&hash, &(*t).value, sizeof((*t).value));
+        uint8_t stated = (*t).has_parent ? 1u : 0u;
+        digest_bytes(&hash, &stated, sizeof(stated));
+        digest_bytes(&hash, &(*t).parent, sizeof((*t).parent));
+        digest_bytes(&hash, &(*t).size, sizeof((*t).size));
+    }
+    return hash;
 }
 
 uint64_t HotManifest_get_type_id(const HotManifest *manifest, const char *name) {

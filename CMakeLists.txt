@@ -140,3 +140,15 @@ elseif(UNIX)
     target_sources(hotcwap PRIVATE window/window_linux.c)
 endif()
 endif() # NOT TARGET hotcwap
+
+# Manifest artifact: headless suite for the module manifest contract
+# (order-tolerant parse, fail-closed swap compatibility, digest).
+# Self-contained (hot/manifest.c only) so it builds standalone and in-tree.
+if(NOT TARGET manifest_test)
+    add_executable(manifest_test
+        hot/manifest.c
+        tests/manifest_test.c
+    )
+    target_include_directories(manifest_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_options(manifest_test PRIVATE -Wall -Wextra -Werror)
+endif()
