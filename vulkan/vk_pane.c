@@ -2,6 +2,7 @@
 #include "vulkan/vk_pane.h"
 #include "vulkan/vk.h"
 #include "vulkan/vulkan_mac.h"
+#include "vulkan/vk_guard.h"
 #include "annotation/overview.h"
 #include "atomic/spin.h"
 #include "time/nanotime.h"
@@ -36,6 +37,7 @@
  *   - VkPane_unregister(index)              : destroy chain, release CB
  *   - VkPane_resize(index, w, h)            : swapchain rebuild (pane size)
  *   - VkPane_presentAll()                   : acquire+render+present per pane
+ *                                            (Rule 39 seam guard at entry)
  *   - VkPane_shutdown()                     : destroy all chains + pool
  *
  * Getters:
@@ -505,6 +507,10 @@ bool VkPane_resize(int index, int width, int height) {
 }
 
 bool VkPane_presentAll(void) {
+    // Rule 39 seam guard: panes submit to the shared queue every frame; a
+    // dead/nulled device must never be handed pane work. Debug net only.
+    if (!VkGuard_check("VkPane_presentAll", Vk_getDevice(), Vk_getQueue(), Vk_isDeviceLost()))
+        return false;
     if (!s_renderer || s_count == 0 || !s_instanceDevice)
         return false;
 

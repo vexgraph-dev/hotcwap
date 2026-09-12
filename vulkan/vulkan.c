@@ -4,6 +4,7 @@
 #include "vulkan/vk.h"
 #include "vulkan/vk_pane.h"
 #include "vulkan/vulkan_mac.h"
+#include "vulkan/vk_guard.h"
 
 #include "annotation/platform_exclusive.h"
 #include "annotation/intention.h"
@@ -63,7 +64,7 @@
   *   - rebuildTargets(void)
   *   - destroyTargets(void)
   *   - buildPipelines(void)
- *   - presentFrameLocked(void)
+ *   - presentFrameLocked(void)     : board present chain (Rule 39 seam guard)
  *   - presentNote(reason)
  *   - presentNoteCode(what, code)
  *   - presentRefenceSignaled(void)
@@ -1427,6 +1428,10 @@ bool Vk_clearPresent(void) {
 static bool presentFrameTail(uint32_t imageIndex);
 
 static bool presentFrameLocked(void) {
+    // Rule 39 seam guard: never touch the driver on a broken health chain.
+    // Debug net (NDEBUG-stripped); release ships Rule 35 hot-minimal only.
+    if (!VkGuard_check("presentFrameLocked", s_device, s_queue, s_deviceLost))
+        return false;
     if (!Vk_ready() || !s_pipelinesBuilt) {
         presentNote("not ready");
         return false;
@@ -1593,6 +1598,9 @@ static bool presentFrameLocked(void) {
 }
 
 static bool presentFrameTail(uint32_t imageIndex) {
+    // Rule 39 seam guard at the board submit/present boundary (device + queue).
+    if (!VkGuard_check("presentFrameTail", s_device, s_queue, s_deviceLost))
+        return false;
     VK_LOAD_DEVICE(BeginCommandBuffer)
     VK_LOAD_DEVICE(EndCommandBuffer)
     VK_LOAD_DEVICE(CmdBeginRenderPass)
