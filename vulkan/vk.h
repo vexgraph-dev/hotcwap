@@ -25,6 +25,12 @@ bool Vk_init(Window *window);
 void Vk_shutdown(void);
 bool Vk_ready(void);
 
+// Terminal device-loss latch: true once the driver reports
+// VK_ERROR_DEVICE_LOST. The VkDevice is dead from that point — presents
+// short-circuit and only a restart recovers. Lets the title report
+// "device lost" instead of a lying "idle".
+bool Vk_isDeviceLost(void);
+
 // Acquire, clear the monitor cache to the window's background color (or the
 // basket panel's own color while one is set), render ONE layer — the direct
 // children of the window's container basket — at absolute desktop

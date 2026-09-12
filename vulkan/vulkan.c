@@ -67,6 +67,7 @@
  *   - presentNote(reason)
  *   - presentNoteCode(what, code)
  *   - presentRefenceSignaled(void)
+ *   - presentDeviceLost(where)
  *   - ensureDrawablePass(void)
   *
  * Setters:
@@ -74,9 +75,10 @@
  *   - Vk_setFrameRenderer(fn, userdata)
   *   - Vk_setClearColor(r, g, b, a)
   *
-  * Getters:
-  *   - Vk_ready(void)
-  *   - Vk_status(void)
+ * Getters:
+ *   - Vk_ready(void)
+ *   - Vk_status(void)
+ *   - Vk_isDeviceLost(void)
   * ============================================================================
   */
 
@@ -195,6 +197,12 @@ static VkCommandBuffer s_cmdBuffer;
 static VkSemaphore s_semAcquire;
 static VkSemaphore s_semRender;
 static VkFence s_fence;
+
+// Terminal device-loss latch: once the driver reports VK_ERROR_DEVICE_LOST
+// the VkDevice is dead — no fence wait, rebuild, or retry can revive it.
+// Latched true, Vk_clearPresent short-circuits (no more 100ms fence burns),
+// and Vk_isDeviceLost lets the title tell the truth instead of "idle".
+static bool s_deviceLost = false;
 
 static VkFormat s_format;
 static VkExtent2D s_extent;
@@ -1381,7 +1389,29 @@ static void presentRefenceSignaled(void) {
         DestroyFence_fn(s_device, old, nullptr);
 }
 
+// Terminal latch: the driver killed the device. Announced once, unthrottled
+// (this is the end of the GPU for this process — a restart is required),
+// then every present short-circuits. Rebuilds and fence recoveries are
+// skipped: they cannot succeed on a lost device.
+static void presentDeviceLost(const char *where) {
+    if (s_deviceLost)
+        return;
+    s_deviceLost = true;
+    snprintf(s_status, sizeof(s_status), "device lost");
+    fprintf(stderr, "vk: DEVICE LOST at %s — restart required (no recovery on a lost VkDevice)\n",
+            where ? where : "?");
+    fflush(stderr);
+}
+
+bool Vk_isDeviceLost(void) {
+    return s_deviceLost;
+}
+
 bool Vk_clearPresent(void) {
+    // Dead device: every wait/rebuild below would burn CPU behind a lying
+    // title. Short-circuit; the latch announcement already named the site.
+    if (s_deviceLost)
+        return false;
     // Resize-cadence calls arrive on thread 0 while the worker may be mid-
     // frame. Try-lock: the busy side wins, the other drops this tick — the
     // regular loop always carries fresher state one tick later.
@@ -1412,7 +1442,12 @@ static bool presentFrameLocked(void) {
     VK_LOAD_DEVICE(AcquireNextImageKHR)
     VK_LOAD_DEVICE(GetFenceStatus)
     VK_LOAD_DEVICE(ResetFences)
-    if (WaitForFences_fn(s_device, 1, &s_fence, VK_TRUE, 100000000ULL) != VK_SUCCESS) {
+    VkResult wr = WaitForFences_fn(s_device, 1, &s_fence, VK_TRUE, 100000000ULL);
+    if (wr == VK_ERROR_DEVICE_LOST) {
+        presentDeviceLost("fence wait");
+        return false;
+    }
+    if (wr != VK_SUCCESS) {
         // Signal landed after the timeout expired: reset and keep the frame
         // instead of dropping work the GPU already finished.
         if (GetFenceStatus_fn && GetFenceStatus_fn(s_device, s_fence) == VK_SUCCESS) {
@@ -1527,11 +1562,15 @@ static bool presentFrameLocked(void) {
         return false;
     }
     if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
-        // Hard acquire error (surface lost / device lost / OOM): the chain
-        // the fence waits on may already be gone, so try one rebuild before
-        // giving up — a lost surface recovers, a lost device stays loud via
-        // the numeric code above. Bounded: exactly one rebuild + one retry;
-        // the caller's dirty-retry carries fresher state next tick.
+        // Hard acquire error (surface lost / OOM): the chain the fence waits
+        // on may already be gone, so try one rebuild before giving up — a
+        // lost surface recovers here. Device loss latches terminal above and
+        // in the retry below. Bounded: exactly one rebuild + one retry; the
+        // caller's dirty-retry carries fresher state next tick.
+        if (ar == VK_ERROR_DEVICE_LOST) {
+            presentDeviceLost("acquire");
+            return false;
+        }
         presentNoteCode("acquire failed", (int) ar);
         if (!rebuildTargets()) {
             presentNote("acquire rebuild failed");
@@ -1539,6 +1578,10 @@ static bool presentFrameLocked(void) {
         }
         ar = AcquireNextImageKHR_fn(s_device, s_swapchain, 25000000ULL,
                                     s_semAcquire, VK_NULL_HANDLE, &imageIndex);
+        if (ar == VK_ERROR_DEVICE_LOST) {
+            presentDeviceLost("acquire retry");
+            return false;
+        }
         if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) {
             presentNoteCode("acquire retry failed", (int) ar);
             return false;
@@ -1667,6 +1710,10 @@ static bool presentFrameTail(uint32_t imageIndex) {
     si.pSignalSemaphores = &s_semRender;
     ResetFences_fn(s_device, 1, &s_fence);
     VkResult sr = QueueSubmit_fn(s_queue, 1, &si, s_fence);
+    if (sr == VK_ERROR_DEVICE_LOST) {
+        presentDeviceLost("submit");
+        return false;
+    }
     if (sr != VK_SUCCESS) {
         // A failed submit leaves the just-reset fence with no pending work:
         // it would never signal again and every future frame would die at
@@ -1685,6 +1732,10 @@ static bool presentFrameTail(uint32_t imageIndex) {
     pi.pSwapchains = &s_swapchain;
     pi.pImageIndices = &imageIndex;
     VkResult pr = QueuePresentKHR_fn(s_queue, &pi);
+    if (pr == VK_ERROR_DEVICE_LOST) {
+        presentDeviceLost("present");
+        return false;
+    }
     if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
         if (pr == VK_ERROR_OUT_OF_DATE_KHR) {
             s_appliedRenderGen = 0;
