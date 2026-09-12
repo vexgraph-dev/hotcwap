@@ -70,6 +70,13 @@
  *   - presentNote(reason)
  *   - presentNoteCode(what, code)
  *   - presentRefenceSignaled(void)
+ *   - Vk_presentFlightIdle(void)     : Rule 39 flight probe — true when the
+ *                                      present submit fence is signaled (the
+ *                                      board present CB that may sample
+ *                                      bindless via the frame renderer has
+ *                                      drained); consumed by the texture-retire
+ *                                      guard to defer Destroy/FreeMemory under a
+ *                                      flying present Submit (page-fault defect)
  *   - presentDeviceLost(where)
  *   - ensureDrawablePass(void)
   *
@@ -82,6 +89,7 @@
  *   - Vk_ready(void)
  *   - Vk_status(void)
  *   - Vk_isDeviceLost(void)
+ *   - Vk_isDebugUtilsEnabled(void)   : VK_EXT_debug_utils live on the device?
   * ============================================================================
   */
 
@@ -116,6 +124,7 @@ VkInstance s_instanceInstance;
 PFN_vkGetInstanceProcAddr s_instanceGpa;
 VkPhysicalDevice s_instancePhys;
 uint32_t s_instanceQueueFamily;
+bool s_instanceDebugUtils;      // VK_EXT_debug_utils actually enabled on s_instanceDevice
 
 static float s_clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 static VkPreFrameFn s_preFrameRenderer = nullptr;
@@ -290,13 +299,17 @@ static void *s_libLoad(void) {
 // Rule 39 seam naming: vkSetDebugUtilsObjectNameEXT (VK_EXT_debug_utils) gives
 // every submit's MTLCommandBuffer a human name, so MoltenVK's device-lost log
 // identifies the faulting seam instead of the generic "vkQueueSubmit" label.
-// No-op when the extension or loader is absent; never fails the build path.
+// Gated on s_instanceDebugUtils — some MoltenVK builds are unsupported for the
+// extension, and calling the loader on a non-debug device segfaults.
 static void Vk_nameObject(VkObjectType type, uint64_t handle, const char *name) {
-    if (!s_device || handle == 0) return;
+    if (!s_device || handle == 0 || !s_instanceDebugUtils) return;
     static PFN_vkSetDebugUtilsObjectNameEXT nameFn = nullptr;
     if (!nameFn && s_gdpa)
         nameFn = (PFN_vkSetDebugUtilsObjectNameEXT)s_gdpa(s_device, "vkSetDebugUtilsObjectNameEXT");
-    if (!nameFn) return;
+    if (!nameFn) {
+        s_instanceDebugUtils = false;
+        return;
+    }
     VkDebugUtilsObjectNameInfoEXT info = { .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT };
     info.objectType = type;
     info.objectHandle = handle;
@@ -424,14 +437,35 @@ bool Vk_init(Window *window) {
         return false;
     }
 
-    // 5. logical device with swapchain extension
+    // 5. logical device — request VK_EXT_debug_utils ONLY when this driver
+    // exposes it (Rule 39 seam naming). An unsupported request is dropped by
+    // MoltenVK yet leaves vkSetDebugUtilsObjectNameEXT on a non-debug device,
+    // which segfaults on call. nDev drives enabledExtensionCount accordingly.
+    VK_LOAD_INSTANCE(EnumerateDeviceExtensionProperties)
+    uint32_t devExtCount = 0;
+    EnumerateDeviceExtensionProperties_fn(s_phys, nullptr, &devExtCount, nullptr);
+    VkExtensionProperties devProps[64];
+    if (devExtCount > 64)
+        devExtCount = 64;
+    EnumerateDeviceExtensionProperties_fn(s_phys, nullptr, &devExtCount, devProps);
+    bool hasDebugUtils = false;
+    for (uint32_t i = 0; i < devExtCount; i++) {
+        if (strcmp(devProps[i].extensionName, "VK_EXT_debug_utils") == 0)
+            hasDebugUtils = true;
+    }
+
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
     qci.queueFamilyIndex = s_queueFamily;
     qci.queueCount = 1;
     qci.pQueuePriorities = &prio;
 
-    const char *devExts[] = { "VK_KHR_swapchain", "VK_EXT_metal_objects", "VK_EXT_debug_utils" };
+    const char *devExts[3];
+    uint32_t nDev = 0;
+    devExts[nDev++] = "VK_KHR_swapchain";
+    devExts[nDev++] = "VK_EXT_metal_objects";
+    if (hasDebugUtils)
+        devExts[nDev++] = "VK_EXT_debug_utils";
     
     VkPhysicalDeviceDescriptorIndexingFeatures idxFeat = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES };
     idxFeat.descriptorBindingPartiallyBound = VK_TRUE;
@@ -443,13 +477,14 @@ bool Vk_init(Window *window) {
     dci.pNext = &idxFeat;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
-    dci.enabledExtensionCount = 3;
+    dci.enabledExtensionCount = nDev;
     dci.ppEnabledExtensionNames = devExts;
 
     if (CreateDevice_fn(s_phys, &dci, nullptr, &s_device) != VK_SUCCESS) {
         snprintf(s_status, sizeof(s_status), "device failed");
         return false;
     }
+    s_instanceDebugUtils = hasDebugUtils;
 
     VK_LOAD_DEVICE(GetDeviceQueue)
     GetDeviceQueue_fn(s_device, s_queueFamily, 0, &s_queue);
@@ -1428,6 +1463,26 @@ static void presentDeviceLost(const char *where) {
 
 bool Vk_isDeviceLost(void) {
     return s_deviceLost;
+}
+
+// Rule 39 flight probe: the present fence s_fence starts SIGNALED and is
+// pending only between a successful submit and that frame's drain, so this
+// non-blocking poll reports "no present CB executing" truthfully — never
+// presented => idle, submit in flight/device lost => busy (defers destroys),
+// frame drained => idle. Never waits, never allocates.
+bool Vk_presentFlightIdle(void) {
+    if (!Vk_ready())
+        return true;
+    if (s_deviceLost)
+        return false;
+    VK_LOAD_DEVICE(GetFenceStatus)
+    if (!GetFenceStatus_fn)
+        return true;
+    return GetFenceStatus_fn(s_device, s_fence) == VK_SUCCESS;
+}
+
+bool Vk_isDebugUtilsEnabled(void) {
+    return s_instanceDebugUtils;
 }
 
 bool Vk_clearPresent(void) {

@@ -31,6 +31,20 @@ bool Vk_ready(void);
 // "device lost" instead of a lying "idle".
 bool Vk_isDeviceLost(void);
 
+// Rule 39 flight probe: true only when the present submit fence is signaled —
+// the board present CB, which may have sampled bindless textures via the frame
+// renderer, is no longer executing. Non-blocking GetFenceStatus poll; the fence
+// starts SIGNALED so a never-presented device reads idle. Consumed by the
+// texture-retire guard: FreeMemory under a flying present Submit is the
+// GPU-page-fault defect, so texture destruction defers while a present flies.
+bool Vk_presentFlightIdle(void);
+
+// True only when VK_EXT_debug_utils is actually enabled on the live device.
+// Callers use this to gate vkSetDebugUtilsObjectNameEXT — the loader resolves
+// the symbol even on unsupported builds, but calling it on a non-debug device
+// segfaults (Rule 39 seam naming).
+bool Vk_isDebugUtilsEnabled(void);
+
 // Acquire, clear the monitor cache to the window's background color (or the
 // basket panel's own color while one is set), render ONE layer — the direct
 // children of the window's container basket — at absolute desktop

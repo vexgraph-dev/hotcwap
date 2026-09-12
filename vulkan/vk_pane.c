@@ -42,6 +42,8 @@
  *
  * Getters:
  *   - VkPane_ready() / VkPane_count()
+ *   - VkPane_flightIdle()             : true when no pane submit is pending
+ *                                       (Rule 39 texture-retire drain probe)
  *
  * Setters:
  *   - VkPane_setRenderer(fn)
@@ -56,6 +58,7 @@ extern VkInstance s_instanceInstance;
 extern PFN_vkGetInstanceProcAddr s_instanceGpa;
 extern VkPhysicalDevice s_instancePhys;
 extern uint32_t s_instanceQueueFamily;
+extern bool s_instanceDebugUtils;   // set when VK_EXT_debug_utils is live on the device
 
 #define VK_LAYER_LOAD_DEVICE(name) \
     static PFN_vk##name name##_fn; \
@@ -66,7 +69,7 @@ extern uint32_t s_instanceQueueFamily;
 // Rule 39 seam naming: label each pane submit's MTLCommandBuffer so a device-lost
 // log names the pane chain instead of the generic "vkQueueSubmit" string.
 static void VkPane_nameObject(VkObjectType type, uint64_t handle, const char *name) {
-    if (!s_instanceDevice || handle == 0)
+    if (!s_instanceDevice || handle == 0 || !s_instanceDebugUtils)
         return;
     static PFN_vkSetDebugUtilsObjectNameEXT nameFn = nullptr;
     if (!nameFn && s_instanceGdpa)
@@ -118,6 +121,30 @@ bool VkPane_ready(void) {
 
 int VkPane_count(void) {
     return s_count;
+}
+
+// Rule 39 flight probe: true only when every pane's last submit fence is
+// signaled — no pane CB that sampled bindless descriptors is still executing.
+// Non-blocking: GetFenceStatus poll only, under a try of the registry lock
+// (a worker mid-present answers busy, safely deferring destroys rather than
+// racing ResetFences). Fences start SIGNALED, so a never-submitted chain is
+// idle, never falsely "flying".
+bool VkPane_flightIdle(void) {
+    if (!VkPane_ready())
+        return true;
+    if (!SpinLock_tryLock(&s_paneLock))
+        return false;
+    VK_LAYER_LOAD_DEVICE(GetFenceStatus)
+    bool idle = true;
+    for (int i = 0; i < s_count && idle; i++) {
+        VkPaneChain *chain = &s_chains[i];
+        if (!(*chain).active || (*chain).fence == VK_NULL_HANDLE)
+            continue;
+        if (GetFenceStatus_fn && GetFenceStatus_fn(s_instanceDevice, (*chain).fence) != VK_SUCCESS)
+            idle = false;
+    }
+    SpinLock_unlock(&s_paneLock);
+    return idle;
 }
 
 void VkPane_setRenderer(VkPaneRenderFn fn) {

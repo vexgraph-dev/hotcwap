@@ -43,6 +43,13 @@ bool VkPane_presentAll(void);
 bool VkPane_ready(void);
 int VkPane_count(void);
 
+// Flight probe for texture-retire safety (Rule 39 net): true only when no
+// pane submit is pending anywhere in the registry — i.e. no pane CB that
+// sampled bindless descriptors is still executing (FreeMemory under a flying
+// pane Submit is the GPU-page-fault defect). Non-blocking GetFenceStatus
+// poll, never waits/allocs; a busy answer safely defers texture destruction.
+bool VkPane_flightIdle(void);
+
 // Teardown: destroy all pane surfaces/swapchains. MUST run before the
 // instance dies (Rule 26: destroy top-down, free last).
 void VkPane_shutdown(void);
