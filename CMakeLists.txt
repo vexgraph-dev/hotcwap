@@ -141,14 +141,28 @@ elseif(UNIX)
 endif()
 endif() # NOT TARGET hotcwap
 
+set(HOTCWAP_TEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../_tests/hotcwap")
+if(NOT EXISTS "${HOTCWAP_TEST_DIR}")
+    set(HOTCWAP_TEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+endif()
+
 # Manifest artifact: headless suite for the module manifest contract
 # (order-tolerant parse, fail-closed swap compatibility, digest).
 # Self-contained (hot/manifest.c only) so it builds standalone and in-tree.
-if(NOT TARGET manifest_test)
+if(NOT TARGET manifest_test AND EXISTS "${HOTCWAP_TEST_DIR}/manifest_test.c")
     add_executable(manifest_test
         hot/manifest.c
-        tests/manifest_test.c
+        ${HOTCWAP_TEST_DIR}/manifest_test.c
     )
     target_include_directories(manifest_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_compile_options(manifest_test PRIVATE -Wall -Wextra -Werror)
+endif()
+
+if(NOT TARGET window_test AND EXISTS "${HOTCWAP_TEST_DIR}/window_test.c")
+    add_executable(window_test
+        ${HOTCWAP_TEST_DIR}/window_test.c
+    )
+    target_include_directories(window_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(window_test PRIVATE hotcwap)
+    target_compile_options(window_test PRIVATE -Wall -Wextra -Werror)
 endif()

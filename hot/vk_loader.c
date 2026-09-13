@@ -23,7 +23,7 @@
   *     char name[64];                         // export symbol name
   *
   *   VkRetiredHandle (one parked dylib):
-  *     void *handle;                          // retired dylib (NULL = free slot)
+  *     void *handle;                          // retired dylib (nullptr = free slot)
   *     uint32_t generation;                   // reload generation when retired
   *
   *   Module statics (file-scope, own the device across reloads):
@@ -64,14 +64,14 @@ static uint32_t s_queue_family = 0;
 static VkPipelineCache s_cache = VK_NULL_HANDLE;
 
 // Module handle
-static void *s_module_handle = NULL;
+static void *s_module_handle = nullptr;
 static bool s_initialized = false;
 
 // Function pointers from the module
-static VkModuleInitFn s_module_init = NULL;
-static VkModuleShutdownFn s_module_shutdown = NULL;
-static VkModuleGetTrampolinesFn s_module_get_trampolines = NULL;
-static VkModuleGetManifestFn s_module_get_manifest = NULL;
+static VkModuleInitFn s_module_init = nullptr;
+static VkModuleShutdownFn s_module_shutdown = nullptr;
+static VkModuleGetTrampolinesFn s_module_get_trampolines = nullptr;
+static VkModuleGetManifestFn s_module_get_manifest = nullptr;
 
 // Trampoline table (atomic)
 #define MAX_TRAMPOLINES 64
@@ -98,14 +98,14 @@ static int trampoline_create(const char *name) {
     if (idx >= MAX_TRAMPOLINES) return -1;
     strncpy(s_trampolines[idx].name, name, 63);
     s_trampolines[idx].name[63] = '\0';
-    atomic_store(&s_trampolines[idx].ptr, NULL);
-    atomic_store(&s_trampolines[idx].fallback_ptr, NULL);
+    atomic_store(&s_trampolines[idx].ptr, nullptr);
+    atomic_store(&s_trampolines[idx].fallback_ptr, nullptr);
     return (int)idx;
 }
 
 void *hot_vk_get_symbol(const char *name) {
     int idx = trampoline_find(name);
-    if (idx < 0) return NULL;
+    if (idx < 0) return nullptr;
     void *ptr = atomic_load(&s_trampolines[idx].ptr);
     if (!ptr) {
         for (int retry = 0; retry < 4 && !ptr; retry++) {
@@ -140,7 +140,7 @@ static void vk_retire_handle(void *handle) {
     for (size_t i = 0; i < VK_RETIRED_MAX; i++) {
         if (s_vk_retired[i].handle && (s_vk_generation - s_vk_retired[i].generation >= VK_RETIRED_GENERATIONS)) {
             dlclose(s_vk_retired[i].handle);
-            s_vk_retired[i].handle = NULL;
+            s_vk_retired[i].handle = nullptr;
         }
     }
 
@@ -174,7 +174,7 @@ static void vk_advance_generation(void) {
     for (size_t i = 0; i < VK_RETIRED_MAX; i++) {
         if (s_vk_retired[i].handle && (s_vk_generation - s_vk_retired[i].generation >= VK_RETIRED_GENERATIONS)) {
             dlclose(s_vk_retired[i].handle);
-            s_vk_retired[i].handle = NULL;
+            s_vk_retired[i].handle = nullptr;
         }
     }
 }
@@ -217,7 +217,7 @@ bool hot_vk_init_loader(VkInstance instance, VkPhysicalDevice phys,
         .initialDataSize = cache_size,
         .pInitialData = cache_data,
     };
-    vkCreatePipelineCache(s_device, &cache_ci, NULL, &s_cache);
+    vkCreatePipelineCache(s_device, &cache_ci, nullptr, &s_cache);
     if (cache_data)
         free(cache_data);
     
@@ -232,7 +232,7 @@ bool hot_vk_load_module(const char *path) {
         if (s_module_shutdown) s_module_shutdown();
         vk_retire_handle(s_module_handle);
         vk_advance_generation();
-        s_module_handle = NULL;
+        s_module_handle = nullptr;
         s_initialized = false;
     }
     
@@ -251,7 +251,7 @@ bool hot_vk_load_module(const char *path) {
     if (!s_module_init || !s_module_get_trampolines || !s_module_get_manifest) {
         fprintf(stderr, "[vk_loader] missing required exports\n");
         dlclose(s_module_handle);
-        s_module_handle = NULL;
+        s_module_handle = nullptr;
         return false;
     }
     
@@ -270,14 +270,14 @@ bool hot_vk_load_module(const char *path) {
         .pipeline_cache_path = "hot/.pipeline_cache",
         .vulkan_api_version = VK_API_VERSION_1_2,
         .pipeline_cache_size = 0,
-        .texture_registry = NULL,
+        .texture_registry = nullptr,
     };
     
     // Initialize the module
     if (!s_module_init(&context)) {
         fprintf(stderr, "[vk_loader] module init failed\n");
         dlclose(s_module_handle);
-        s_module_handle = NULL;
+        s_module_handle = nullptr;
         return false;
     }
     
@@ -306,12 +306,12 @@ void hot_vk_shutdown(void) {
     if (s_module_shutdown) s_module_shutdown();
     if (s_module_handle) {
         dlclose(s_module_handle);
-        s_module_handle = NULL;
+        s_module_handle = nullptr;
     }
     for (size_t i = 0; i < VK_RETIRED_MAX; i++) {
         if (s_vk_retired[i].handle) {
             dlclose(s_vk_retired[i].handle);
-            s_vk_retired[i].handle = NULL;
+            s_vk_retired[i].handle = nullptr;
         }
     }
     s_initialized = false;
@@ -333,7 +333,7 @@ void hot_vk_shutdown(void) {
                 free(data);
             }
         }
-        vkDestroyPipelineCache(s_device, s_cache, NULL);
+        vkDestroyPipelineCache(s_device, s_cache, nullptr);
         s_cache = VK_NULL_HANDLE;
     }
     

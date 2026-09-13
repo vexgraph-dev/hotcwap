@@ -1,5 +1,5 @@
 #include "hot/vk_context.h"
-#include "hotcwap-type.h"
+#include "../oop/hotcwap-type.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -76,7 +76,7 @@ static void register_trampoline(const char *name, void *fn) {
             return s_trampolines[i].function;
         }
     }
-    return NULL;
+    return nullptr;
 }
 
 // Pipeline cache — serialized across reloads
