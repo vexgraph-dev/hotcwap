@@ -234,6 +234,11 @@ static int macKeyMap[128] = {
     [47] = KEY_PERIOD,             [48] = KEY_TAB,
     [49] = KEY_SPACE,              [50] = KEY_GRAVE_ACCENT,
     [51] = KEY_BACKSPACE,          [53] = KEY_ESCAPE,
+    [54] = KEY_RIGHT_SUPER,        [55] = KEY_LEFT_SUPER,
+    [56] = KEY_LEFT_SHIFT,         [57] = KEY_CAPS_LOCK,
+    [58] = KEY_LEFT_ALT,           [59] = KEY_LEFT_CONTROL,
+    [60] = KEY_RIGHT_SHIFT,        [61] = KEY_RIGHT_ALT,
+    [62] = KEY_RIGHT_CONTROL,      [63] = KEY_FN,
     [96] = KEY_F5,                 [97] = KEY_F6,
     [98] = KEY_F7,                 [99] = KEY_F3,
     [100] = KEY_F8,                [101] = KEY_F9,
@@ -754,8 +759,49 @@ static void routeEvent(NSEvent *event) {
         return;
 
     switch (type) {
+        case NSEventTypeFlagsChanged: {
+            short macCode = [event keyCode];
+            NSEventModifierFlags flags = [event modifierFlags];
+            int stdKey = (macCode >= 0 && macCode < 128) ? macKeyMap[macCode] : -1;
+            if (stdKey != -1) {
+                bool isDown = false;
+                if (macCode == 54 || macCode == 55) {
+                    isDown = (flags & NSEventModifierFlagCommand) != 0;
+                } else if (macCode == 56 || macCode == 60) {
+                    isDown = (flags & NSEventModifierFlagShift) != 0;
+                } else if (macCode == 58 || macCode == 61) {
+                    isDown = (flags & NSEventModifierFlagOption) != 0;
+                } else if (macCode == 59 || macCode == 62) {
+                    isDown = (flags & NSEventModifierFlagControl) != 0;
+                } else if (macCode == 57) {
+                    isDown = (flags & NSEventModifierFlagCapsLock) != 0;
+                }
+                Key_pushEvent(wid, stdKey,
+                              isDown ? KEY_ACTION_DOWN : KEY_ACTION_UP,
+                              kTapThresholdNanos);
+            }
+            break;
+        }
+
         case NSEventTypeKeyDown:
         case NSEventTypeKeyUp: {
+            NSEventModifierFlags flags = [event modifierFlags];
+            bool cmd = (flags & NSEventModifierFlagCommand) != 0;
+            if (cmd != (Key_isDown(KEY_LEFT_SUPER) || Key_isDown(KEY_RIGHT_SUPER))) {
+                Key_pushEvent(wid, KEY_LEFT_SUPER, cmd ? KEY_ACTION_DOWN : KEY_ACTION_UP, kTapThresholdNanos);
+            }
+            bool ctrl = (flags & NSEventModifierFlagControl) != 0;
+            if (ctrl != (Key_isDown(KEY_LEFT_CONTROL) || Key_isDown(KEY_RIGHT_CONTROL))) {
+                Key_pushEvent(wid, KEY_LEFT_CONTROL, ctrl ? KEY_ACTION_DOWN : KEY_ACTION_UP, kTapThresholdNanos);
+            }
+            bool alt = (flags & NSEventModifierFlagOption) != 0;
+            if (alt != (Key_isDown(KEY_LEFT_ALT) || Key_isDown(KEY_RIGHT_ALT))) {
+                Key_pushEvent(wid, KEY_LEFT_ALT, alt ? KEY_ACTION_DOWN : KEY_ACTION_UP, kTapThresholdNanos);
+            }
+            bool shift = (flags & NSEventModifierFlagShift) != 0;
+            if (shift != (Key_isDown(KEY_LEFT_SHIFT) || Key_isDown(KEY_RIGHT_SHIFT))) {
+                Key_pushEvent(wid, KEY_LEFT_SHIFT, shift ? KEY_ACTION_DOWN : KEY_ACTION_UP, kTapThresholdNanos);
+            }
             short macCode = [event keyCode];
             if (macCode >= 0 && macCode < 128) {
                 int stdKey = macKeyMap[macCode];
@@ -788,11 +834,11 @@ static void routeEvent(NSEvent *event) {
             int button = (type == NSEventTypeLeftMouseDown) ? MOUSE_LEFT
                        : ((type == NSEventTypeRightMouseDown) ? MOUSE_RIGHT
                                                               : (int)[event buttonNumber]);
-            Mouse_pushButtonEvent(wid, button, KEY_ACTION_DOWN, kTapThresholdNanos);
-            // Clicks also refresh the tracked cursor position (legacy parity).
+            // Refresh tracked cursor position BEFORE button event so Mouse_x()/y() are current in callbacks.
             double x, y;
             mouseLocation(event, &x, &y);
             Mouse_pushMoveEvent(wid, x, y);
+            Mouse_pushButtonEvent(wid, button, KEY_ACTION_DOWN, kTapThresholdNanos);
             break;
         }
 
@@ -802,10 +848,10 @@ static void routeEvent(NSEvent *event) {
             int button = (type == NSEventTypeLeftMouseUp) ? MOUSE_LEFT
                        : ((type == NSEventTypeRightMouseUp) ? MOUSE_RIGHT
                                                              : (int)[event buttonNumber]);
-            Mouse_pushButtonEvent(wid, button, KEY_ACTION_UP, kTapThresholdNanos);
             double x, y;
             mouseLocation(event, &x, &y);
             Mouse_pushMoveEvent(wid, x, y);
+            Mouse_pushButtonEvent(wid, button, KEY_ACTION_UP, kTapThresholdNanos);
             break;
         }
 
